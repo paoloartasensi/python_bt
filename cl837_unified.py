@@ -322,7 +322,7 @@ class CL837UnifiedMonitor:
         # Update statistics
         self.update_statistics_display()
         
-        return self.lines
+        return self.lines + [self.stats_text]
 
     def update_statistics_display(self):
         """Update the statistics display"""
