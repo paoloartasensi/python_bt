@@ -50,6 +50,9 @@ class CL837UnifiedMonitor:
         self.start_time = time.time()
         self.last_values = {'x': 0, 'y': 0, 'z': 0, 'mag': 0}
         
+        # Instantaneous frequency window
+        self.freq_window = deque(maxlen=50)  # Window for instantaneous frequency
+        
         # Oscilloscope
         self.fig = None
         self.axes = None
@@ -57,6 +60,9 @@ class CL837UnifiedMonitor:
         self.animation = None
         self.plot_thread = None
         self.plot_ready = False
+
+        # Instantaneous frequency
+        self.instant_freq = 0.0  # Current instantaneous frequency
 
     async def scan_and_connect(self):
         """Scan and connect to CL837"""
@@ -334,12 +340,13 @@ class CL837UnifiedMonitor:
         
         current_vals = self.last_values
         
+        # Usa frequenza istantanea invece di media cumulativa
         stats_text = f"""LIVE STATISTICS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Samples: {self.sample_count:,}
 Spikes: {self.spike_count}
 Time: {elapsed_time:.1f}s  
-Frequency: {avg_frequency:.1f} Hz
+Frequency: {self.instant_freq:.1f} Hz  # <- FREQUENZA ISTANTANEA
 
 CURRENT VALUES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -441,16 +448,22 @@ DEVICE
             self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
             self.sample_count += 1
             
+            # Instantaneous frequency calculation
+            self.freq_window.append(current_time)
+            if len(self.freq_window) >= 2:
+                time_span = self.freq_window[-1] - self.freq_window[0]
+                self.instant_freq = (len(self.freq_window) - 1) / time_span if time_span > 0 else 0
+            else:
+                self.instant_freq = 0
+            
             # Detailed console output for multi-sample
             if total_samples > 1:
                 print(f"   Sample {sample_index}/{total_samples}: X:{ax_g:+.3f} Y:{ay_g:+.3f} Z:{az_g:+.3f} Mag:{magnitude:.3f}g")
             elif self.sample_count % 15 == 0:  # More frequent output for responsiveness
-                elapsed = current_time - self.start_time
-                freq = self.sample_count / elapsed if elapsed > 0 else 0
                 spike_marker = "SPIKE" if is_spike else "DATA"
                 print(f"[{spike_marker}] #{self.sample_count:>4} | "
                       f"X:{ax_g:+.3f} Y:{ay_g:+.3f} Z:{az_g:+.3f} | "
-                      f"Mag:{magnitude:.3f}g | {freq:.1f}Hz")
+                      f"Mag:{magnitude:.3f}g | {self.instant_freq:.1f}Hz")  # <- USA FREQUENZA ISTANTANEA
             
             return True
             
