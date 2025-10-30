@@ -1,0 +1,28 @@
+# CL837 BLE Accelerometer Monitor Dependencies
+# Real-time monitoring and visualization for CL837 Chileaf protocol accelerometer
+
+# BLE Communication
+bleak>=0.21.0              # Cross-platform Bluetooth Low Energy library
+
+# Data Visualization  
+matplotlib>=3.7.0          # Plotting and real-time oscilloscope visualization
+numpy>=1.24.0              # Numerical computing for data processing
+
+# Note: Standard library modules (no installation required):
+# - asyncio          # Async/await support for BLE operations
+# - struct           # Binary data parsing (Chileaf protocol)
+# - time             # Timing and frequency calculations  
+# - threading        # Oscilloscope thread management
+# - collections      # Deque for efficient data buffering
+# - datetime         # Timestamp handling
+# - traceback        # Error debugging
+
+# Optional: Development and testing dependencies
+# pytest>=7.0.0            # Unit testing framework
+# black>=23.0.0            # Code formatting
+# flake8>=6.0.0            # Code linting
+
+# Platform-specific notes:
+# Windows: Requires Windows 10 version 1903+ for reliable BLE support
+# Linux: May require bluez-tools and python3-dev packages
+# macOS: Requires macOS 10.15+ for Core Bluetooth support
