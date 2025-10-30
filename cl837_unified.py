@@ -350,12 +350,10 @@ DISPOSITIVO
                     # Frame accelerometro valido
                     return self.parse_multi_sample_frame(data)
                 else:
-                    # Frame Chileaf ma NON accelerometro - IGNORA
-                    print(f"⚠️ Frame Chileaf ignorato: Command=0x{command:02X} (non accelerometro)")
+                    # Frame Chileaf ma NON accelerometro - ignorato silenziosamente
                     return False
             else:
-                # Frame non-Chileaf - IGNORA
-                print(f"⚠️ Frame non-Chileaf ignorato: {data.hex().upper()}")
+                # Frame non-Chileaf - ignorato silenziosamente
                 return False
                 
         except Exception as e:
