@@ -388,9 +388,10 @@ DEVICE
         # header = data[0]
         # length = data[1]
         # command = data[2]
+        # checksum = data[length-1]
                 
         # Calculate how many 6-byte samples are in the payload
-        payload_bytes = len(data) - 3  # Exclude header, length, command
+        payload_bytes = len(data) - 4  # Exclude header, length, command and checksum
         samples_count = payload_bytes // 6
         remaining_bytes = payload_bytes % 6
         
