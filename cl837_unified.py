@@ -1,6 +1,6 @@
 """
 CL837 Unified Accelerometer Monitor
-Connessione, lettura e visualizzazione oscilloscopio in tempo reale
+Connection, reading and real-time oscilloscope visualization
 """
 
 import asyncio
@@ -20,15 +20,15 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
 class CL837UnifiedMonitor:
-    """Monitor unificato CL837 con oscilloscopio integrato"""
+    """Unified CL837 monitor with integrated oscilloscope"""
     
     def __init__(self):
-        # Connessione BLE
+        # BLE Connection
         self.client = None
         self.device = None
         self.is_connected = False
         
-        # Protocollo Chileaf
+        # Chileaf Protocol
         self.CHILEAF_SERVICE_UUID = "aae28f00-71b5-42a1-8c3c-f9cf6ac969d0"
         self.CHILEAF_TX_UUID = "aae28f01-71b5-42a1-8c3c-f9cf6ac969d0"
         self.CHILEAF_RX_UUID = "aae28f02-71b5-42a1-8c3c-f9cf6ac969d0"
@@ -36,21 +36,21 @@ class CL837UnifiedMonitor:
         self.CHILEAF_CMD_ACCELEROMETER = 0x0C
         self.CHILEAF_CONVERSION_FACTOR = 4096.0
         
-        # Dati per oscilloscopio
-        self.max_samples = 300   # Finestra ridotta per latenza minore (~12 sec a 25Hz)
+        # Oscilloscope Data
+        self.max_samples = 300   # Reduced window for lower latency (~12 sec at 25Hz)
         self.x_data = deque(maxlen=self.max_samples)
         self.y_data = deque(maxlen=self.max_samples)
         self.z_data = deque(maxlen=self.max_samples)
         self.magnitude_data = deque(maxlen=self.max_samples)
         self.timestamps = deque(maxlen=self.max_samples)
         
-        # Statistiche
+        # Statistics
         self.sample_count = 0
         self.spike_count = 0
         self.start_time = time.time()
         self.last_values = {'x': 0, 'y': 0, 'z': 0, 'mag': 0}
         
-        # Oscilloscopio
+        # Oscilloscope
         self.fig = None
         self.axes = None
         self.lines = []
@@ -59,8 +59,8 @@ class CL837UnifiedMonitor:
         self.plot_ready = False
 
     async def scan_and_connect(self):
-        """Scansiona e connetti al CL837"""
-        print("🔍 Ricerca dispositivi CL837...")
+        """Scan and connect to CL837"""
+        print("Searching for CL837 devices...")
         
         devices = await BleakScanner.discover(timeout=8.0)
         
@@ -70,144 +70,144 @@ class CL837UnifiedMonitor:
                 cl837_devices.append(device)
         
         if not cl837_devices:
-            print("❌ Nessun dispositivo CL837 trovato")
-            print("💡 Assicurati che il dispositivo sia acceso e in modalità pairing")
+            print("No CL837 devices found")
+            print("Make sure the device is turned on and in pairing mode")
             return False
         
-        print(f"✅ Trovati {len(cl837_devices)} dispositivi CL837:")
+        print(f"Found {len(cl837_devices)} CL837 devices:")
         for i, device in enumerate(cl837_devices, 1):
             print(f"   {i}. {device.name} ({device.address})")
         
-        # 🎯 SELEZIONE INTERATTIVA DEL DISPOSITIVO
+        # INTERACTIVE DEVICE SELECTION
         if len(cl837_devices) == 1:
-            # Solo uno disponibile - connessione diretta
+            # Only one available - direct connection
             target_device = cl837_devices[0]
-            print(f"\n🎯 Connessione automatica a: {target_device.name}")
+            print(f"\nAutomatic connection to: {target_device.name}")
         else:
-            # Più dispositivi - chiedi all'utente
+            # Multiple devices - ask user
             while True:
                 try:
-                    print(f"\n🔢 Seleziona dispositivo (1-{len(cl837_devices)}) o 'q' per uscire:")
-                    choice = input("➤ ").strip().lower()
+                    print(f"\nSelect device (1-{len(cl837_devices)}) or 'q' to exit:")
+                    choice = input("> ").strip().lower()
                     
                     if choice == 'q':
-                        print("❌ Connessione annullata")
+                        print("Connection cancelled")
                         return False
                     
                     device_index = int(choice) - 1
                     if 0 <= device_index < len(cl837_devices):
                         target_device = cl837_devices[device_index]
-                        print(f"\n🎯 Connessione a: {target_device.name}")
+                        print(f"\nConnecting to: {target_device.name}")
                         break
                     else:
-                        print(f"⚠️ Scelta non valida. Inserisci un numero tra 1 e {len(cl837_devices)}")
+                        print(f"Invalid choice. Enter a number between 1 and {len(cl837_devices)}")
                         
                 except ValueError:
-                    print("⚠️ Inserisci un numero valido o 'q' per uscire")
+                    print("Enter a valid number or 'q' to exit")
                 except KeyboardInterrupt:
-                    print("\n❌ Connessione annullata")
+                    print("\nConnection cancelled")
                     return False
         
         try:
-            print("⏳ Connessione in corso...")
-            # 🚀 LOW-LATENCY: timeout ridotto per connessioni più reattive
+            print("Connecting...")
+            # LOW-LATENCY: reduced timeout for more responsive connections
             self.client = BleakClient(target_device, timeout=10.0)
             await self.client.connect()
             
             if self.client.is_connected:
                 self.device = target_device
                 self.is_connected = True
-                print(f"✅ Connesso con successo!")
+                print("Successfully connected!")
                 
-                # 🚀 OTTIMIZZAZIONE LATENZA: Richiedi parametri low-latency
-                print("⚡ Configurazione low-latency BLE...")
+                # LATENCY OPTIMIZATION: Request low-latency parameters
+                print("Configuring low-latency BLE...")
                 try:
-                    # Bleak non ha API diretta per connection parameters, ma alcuni OS supportano hints
-                    # Windows: Prova a impostare priorità alta per la connessione
+                    # Bleak doesn't have direct API for connection parameters, but some OS support hints
+                    # Windows: Try to set high priority for the connection
                     if hasattr(self.client, '_backend') and hasattr(self.client._backend, '_requester'):
-                        print("   💡 Hint: Connection priority HIGH richiesta")
+                        print("   Hint: Connection priority HIGH requested")
                 except Exception as e:
-                    print(f"   ⚠️ Connection parameters non configurabili: {e}")
+                    print(f"   Connection parameters not configurable: {e}")
                 
                 return True
             else:
-                print("❌ Connessione fallita")
+                print("Connection failed")
                 return False
                 
         except Exception as e:
-            print(f"❌ Errore di connessione: {e}")
+            print(f"Connection error: {e}")
             return False
 
     async def discover_services(self):
-        """Analizza servizi e caratteristiche del dispositivo"""
-        print(f"\n🔍 Analisi servizi BLE...")
+        """Analyze device services and characteristics"""
+        print("\nAnalyzing BLE services...")
         
         chileaf_service = None
         tx_characteristic = None
         
         for service in self.client.services:
-            print(f"📋 Servizio: {service.uuid}")
+            print(f"Service: {service.uuid}")
             
             if service.uuid.lower() == self.CHILEAF_SERVICE_UUID.lower():
-                print(f"   🎯 SERVIZIO CHILEAF IDENTIFICATO!")
+                print("   CHILEAF SERVICE IDENTIFIED!")
                 chileaf_service = service
             
             for char in service.characteristics:
-                print(f"   📊 Caratteristica: {char.uuid} - {char.properties}")
+                print(f"   Characteristic: {char.uuid} - {char.properties}")
                 
                 if char.uuid.lower() == self.CHILEAF_TX_UUID.lower():
-                    # 🚀 Controlla supporto per indicate (più veloce di notify)
+                    # Check support for indicate (faster than notify)
                     supports_indicate = "indicate" in char.properties
                     supports_notify = "notify" in char.properties
                     
                     speed_info = "INDICATE" if supports_indicate else "NOTIFY" if supports_notify else "NONE"
-                    print(f"      ✅ CARATTERISTICA TX CHILEAF ({speed_info})")
+                    print(f"      CHILEAF TX CHARACTERISTIC ({speed_info})")
                     
                     if supports_indicate:
-                        print(f"         🚀 INDICATE supportato - Latenza minima disponibile!")
+                        print("         INDICATE supported - Minimum latency available!")
                     
                     tx_characteristic = char
                 elif char.uuid.lower() == self.CHILEAF_RX_UUID.lower():
-                    print(f"      ✅ CARATTERISTICA RX CHILEAF (Comandi)")
+                    print("      CHILEAF RX CHARACTERISTIC (Commands)")
         
         if not tx_characteristic:
-            print("❌ Caratteristica TX Chileaf non trovata!")
+            print("Chileaf TX characteristic not found!")
             return False
         
         if "notify" not in tx_characteristic.properties:
-            print("❌ La caratteristica TX non supporta le notifiche!")
+            print("The TX characteristic does not support notifications!")
             return False
         
-        print("✅ Servizio Chileaf configurato correttamente")
+        print("Chileaf service configured correctly")
         self.tx_char = tx_characteristic
         return True
 
     def setup_oscilloscope(self):
-        """Inizializza l'oscilloscopio matplotlib"""
-        print("📊 Inizializzazione oscilloscopio...")
+        """Initialize matplotlib oscilloscope"""
+        print("Initializing oscilloscope...")
         
-        # Crea figura con subplots
+        # Create figure with subplots
         self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
         self.fig.suptitle("CL837 Accelerometer Oscilloscope - Real Time", fontsize=16)
         
-        # Configura assi
+        # Configure axes
         ax_xyz, ax_mag, ax_xy, ax_stats = self.axes.flatten()
         
-        # Grafico XYZ
-        ax_xyz.set_title("Accelerazione XYZ (g)")
-        ax_xyz.set_xlabel("Campioni")
-        ax_xyz.set_ylabel("Accelerazione (g)")
+        # XYZ plot
+        ax_xyz.set_title("XYZ Acceleration (g)")
+        ax_xyz.set_xlabel("Samples")
+        ax_xyz.set_ylabel("Acceleration (g)")
         ax_xyz.grid(True, alpha=0.3)
         ax_xyz.legend(['X', 'Y', 'Z'])
         
-        # Grafico Magnitudine
-        ax_mag.set_title("Magnitudine Totale")
-        ax_mag.set_xlabel("Campioni")
-        ax_mag.set_ylabel("Magnitudine (g)")
+        # Magnitude plot
+        ax_mag.set_title("Total Magnitude")
+        ax_mag.set_xlabel("Samples")
+        ax_mag.set_ylabel("Magnitude (g)")
         ax_mag.grid(True, alpha=0.3)
         
-        # Grafico XY (vista dall'alto)
-        ax_xy.set_title("Vista XY (dall'alto)")
+        # XY plot (top view)
+        ax_xy.set_title("XY View (from top)")
         ax_xy.set_xlabel("X (g)")
         ax_xy.set_ylabel("Y (g)")
         ax_xy.grid(True, alpha=0.3)
@@ -215,11 +215,11 @@ class CL837UnifiedMonitor:
         ax_xy.set_xlim(-2, 2)
         ax_xy.set_ylim(-2, 2)
         
-        # Area statistiche
-        ax_stats.set_title("Statistiche Live")
+        # Statistics area
+        ax_stats.set_title("Live Statistics")
         ax_stats.axis('off')
         
-        # Inizializza linee
+        # Initialize lines
         line_x, = ax_xyz.plot([], [], 'r-', label='X', alpha=0.8)
         line_y, = ax_xyz.plot([], [], 'g-', label='Y', alpha=0.8)
         line_z, = ax_xyz.plot([], [], 'b-', label='Z', alpha=0.8)
@@ -228,55 +228,55 @@ class CL837UnifiedMonitor:
         
         self.lines = [line_x, line_y, line_z, line_mag, line_xy]
         
-        # Testo statistiche
+        # Statistics text
         self.stats_text = ax_stats.text(0.05, 0.95, "", transform=ax_stats.transAxes,
                                        fontsize=10, verticalalignment='top',
                                        fontfamily='monospace')
         
         plt.tight_layout()
-        print("✅ Oscilloscopio configurato")
+        print("Oscilloscope configured")
 
     def start_oscilloscope_thread(self):
-        """Avvia oscilloscopio in thread separato"""
+        """Start oscilloscope in separate thread"""
         def run_plot():
             self.setup_oscilloscope()
             self.animation = animation.FuncAnimation(
-                self.fig, self.update_plot, interval=25, blit=True)  # 40Hz refresh + blitting per performance
+                self.fig, self.update_plot, interval=25, blit=True)  # 40Hz refresh + blitting for performance
             self.plot_ready = True
             plt.show()
         
         self.plot_thread = threading.Thread(target=run_plot, daemon=True)
         self.plot_thread.start()
         
-        # Aspetta che il plot sia pronto
+        # Wait for plot to be ready
         while not self.plot_ready:
             time.sleep(0.1)
         
-        print("🚀 Oscilloscopio avviato in thread separato")
+        print("Oscilloscope started in separate thread")
 
     def update_plot(self, frame):
-        """Aggiorna i grafici dell'oscilloscopio"""
+        """Update oscilloscope plots"""
         if len(self.x_data) < 2:
             return self.lines
         
-        # Converti deque in liste per matplotlib
+        # Convert deque to lists for matplotlib
         x_list = list(self.x_data)
         y_list = list(self.y_data)
         z_list = list(self.z_data)
         mag_list = list(self.magnitude_data)
         
-        # Crea indici per x-axis
+        # Create indices for x-axis
         indices = list(range(len(x_list)))
         
-        # Aggiorna linee XYZ
+        # Update XYZ lines
         self.lines[0].set_data(indices, x_list)  # X
         self.lines[1].set_data(indices, y_list)  # Y
         self.lines[2].set_data(indices, z_list)  # Z
         
-        # Aggiorna magnitudine
+        # Update magnitude
         self.lines[3].set_data(indices, mag_list)
         
-        # Aggiorna vista XY (ultimi 50 punti)
+        # Update XY view (last 50 points)
         if len(x_list) > 50:
             xy_x = x_list[-50:]
             xy_y = y_list[-50:]
@@ -285,7 +285,7 @@ class CL837UnifiedMonitor:
             xy_y = y_list
         self.lines[4].set_data(xy_x, xy_y)
         
-        # Aggiorna limiti assi automaticamente
+        # Update axes limits automatically
         if indices:
             # XYZ plot
             self.axes[0, 0].set_xlim(max(0, len(indices)-200), len(indices))
@@ -295,20 +295,20 @@ class CL837UnifiedMonitor:
                 margin = (y_max - y_min) * 0.1 + 0.1
                 self.axes[0, 0].set_ylim(y_min - margin, y_max + margin)
             
-            # Magnitudine plot
+            # Magnitude plot
             self.axes[0, 1].set_xlim(max(0, len(indices)-200), len(indices))
             if mag_list:
                 mag_min, mag_max = min(mag_list), max(mag_list)
                 margin = (mag_max - mag_min) * 0.1 + 0.1
                 self.axes[0, 1].set_ylim(mag_min - margin, mag_max + margin)
         
-        # Aggiorna statistiche
+        # Update statistics
         self.update_statistics_display()
         
         return self.lines
 
     def update_statistics_display(self):
-        """Aggiorna il display delle statistiche"""
+        """Update the statistics display"""
         if self.sample_count == 0:
             return
             
@@ -317,104 +317,102 @@ class CL837UnifiedMonitor:
         
         current_vals = self.last_values
         
-        stats_text = f"""STATISTICHE LIVE
+        stats_text = f"""LIVE STATISTICS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 Campioni: {self.sample_count:,}
-🚨 Spike: {self.spike_count}
-⏱️  Tempo: {elapsed_time:.1f}s  
-📈 Frequenza: {avg_frequency:.1f} Hz
+Samples: {self.sample_count:,}
+Spikes: {self.spike_count}
+Time: {elapsed_time:.1f}s  
+Frequency: {avg_frequency:.1f} Hz
 
-VALORI ATTUALI
+CURRENT VALUES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔴 X: {current_vals['x']:+.3f}g
-🟢 Y: {current_vals['y']:+.3f}g  
-🔵 Z: {current_vals['z']:+.3f}g
-🟣 Mag: {current_vals['mag']:.3f}g
+X: {current_vals['x']:+.3f}g
+Y: {current_vals['y']:+.3f}g  
+Z: {current_vals['z']:+.3f}g
+Mag: {current_vals['mag']:.3f}g
 
-DISPOSITIVO
+DEVICE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📱 {self.device.name if self.device else 'N/A'}
-🔗 {self.device.address if self.device else 'N/A'}
+{self.device.name if self.device else 'N/A'}
+{self.device.address if self.device else 'N/A'}
 """
         
         self.stats_text.set_text(stats_text)
 
     def parse_chileaf_data(self, data):
-        """Parsing dati dal protocollo Chileaf - SOLO frame accelerometro 0x0C"""
+        """Parse data from Chileaf protocol - ONLY accelerometer frames 0x0C"""
         try:
-            # FILTRO RIGOROSO: Solo frame Chileaf con command 0x0C
+            # STRICT FILTER: Only Chileaf frames with command 0x0C
             if len(data) >= 3 and data[0] == self.CHILEAF_HEADER:
                 command = data[2]
                 
                 if command == self.CHILEAF_CMD_ACCELEROMETER:
-                    # Frame accelerometro valido
+                    # Valid accelerometer frame
                     return self.parse_multi_sample_frame(data)
                 else:
-                    # Frame Chileaf ma NON accelerometro - ignorato silenziosamente
+                    # Chileaf frame but NOT accelerometer - silently ignored
                     return False
             else:
-                # Frame non-Chileaf - ignorato silenziosamente
+                # Non-Chileaf frame - silently ignored
                 return False
                 
         except Exception as e:
-            print(f"⚠️ Errore parsing: {e}")
+            print(f"Parsing error: {e}")
             return False
 
     def parse_multi_sample_frame(self, data):
-        """Parsing frame Chileaf con possibili campioni multipli secondo doc 0x0C"""
+        """Parse Chileaf frame with possible multiple samples according to 0x0C doc"""
         header = data[0]
         length = data[1]
         command = data[2]
-        
-        # � ULTRA LOW-LATENCY: Eliminato logging verboso che rallentava ogni frame
-        
-        # Calcola quanti campioni da 6 bytes ci sono nel payload
-        payload_bytes = len(data) - 3  # Escludi header, length, command
+                
+        # Calculate how many 6-byte samples are in the payload
+        payload_bytes = len(data) - 3  # Exclude header, length, command
         samples_count = payload_bytes // 6
         remaining_bytes = payload_bytes % 6
         
-        # Processa tutti i campioni nel frame
+        # Process all samples in the frame
         samples_processed = 0
         for i in range(samples_count):
-            offset = 3 + (i * 6)  # 3 per header + i * 6 bytes per campione
+            offset = 3 + (i * 6)  # 3 for header + i * 6 bytes per sample
             if offset + 6 <= len(data):
                 sample_data = data[offset:offset+6]
                 success = self.parse_single_sample(sample_data, data, sample_index=i+1, total_samples=samples_count)
                 if success:
                     samples_processed += 1
         
-        # 🚀 Bytes rimanenti processati silenziosamente per velocità
+        # Remaining bytes processed silently for speed
         
         return samples_processed > 0
 
     def parse_single_sample(self, accel_data, original_frame, sample_index=1, total_samples=1):
-        """Parsing di un singolo campione accelerometro"""
+        """Parse single accelerometer sample"""
         if len(accel_data) < 6:
             return False
         
         try:
-            # Parsing accelerometro (6 bytes = 3 assi x 2 bytes int16 little-endian)
+            # Accelerometer parsing (6 bytes = 3 axes x 2 bytes int16 little-endian)
             rawAX, rawAY, rawAZ = struct.unpack('<hhh', accel_data)
             
-            # Conversione in g-force
+            # Convert to g-force
             ax_g = rawAX / self.CHILEAF_CONVERSION_FACTOR
             ay_g = rawAY / self.CHILEAF_CONVERSION_FACTOR
             az_g = rawAZ / self.CHILEAF_CONVERSION_FACTOR
             magnitude = (ax_g**2 + ay_g**2 + az_g**2)**0.5
             
-            # 🚨 FILTRO SPIKE DETECTION
+            # SPIKE DETECTION FILTER
             is_spike = self.detect_spike(ax_g, ay_g, az_g, magnitude, original_frame)
             
-            if is_spike and total_samples == 1:  # Solo per campioni singoli
+            if is_spike and total_samples == 1:  # Only for single samples
                 self.spike_count += 1
-                print(f"🚨 SPIKE RILEVATO #{self.sample_count + 1}:")
+                print(f"SPIKE DETECTED #{self.sample_count + 1}:")
                 print(f"   Raw frame: {original_frame.hex().upper()}")
                 print(f"   Sample data: {accel_data.hex().upper()}")
                 print(f"   Raw values: AX={rawAX} AY={rawAY} AZ={rawAZ}")
                 print(f"   G values: X={ax_g:+.3f} Y={ay_g:+.3f} Z={az_g:+.3f} Mag={magnitude:.3f}")
                 print("   ---")
             
-            # Aggiungi ai buffer oscilloscopio
+            # Add to oscilloscope buffers
             current_time = time.time()
             self.x_data.append(ax_g)
             self.y_data.append(ay_g)
@@ -422,150 +420,149 @@ DISPOSITIVO
             self.magnitude_data.append(magnitude)
             self.timestamps.append(current_time)
             
-            # Aggiorna statistiche
+            # Update statistics
             self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
             self.sample_count += 1
             
-            # Output console dettagliato per multi-sample
+            # Detailed console output for multi-sample
             if total_samples > 1:
-                print(f"   Campione {sample_index}/{total_samples}: X:{ax_g:+.3f} Y:{ay_g:+.3f} Z:{az_g:+.3f} Mag:{magnitude:.3f}g")
-            elif self.sample_count % 15 == 0:  # Output più frequente per responsività
+                print(f"   Sample {sample_index}/{total_samples}: X:{ax_g:+.3f} Y:{ay_g:+.3f} Z:{az_g:+.3f} Mag:{magnitude:.3f}g")
+            elif self.sample_count % 15 == 0:  # More frequent output for responsiveness
                 elapsed = current_time - self.start_time
                 freq = self.sample_count / elapsed if elapsed > 0 else 0
-                spike_marker = "🚨" if is_spike else "📊"
-                print(f"{spike_marker} #{self.sample_count:>4} | "
+                spike_marker = "SPIKE" if is_spike else "DATA"
+                print(f"[{spike_marker}] #{self.sample_count:>4} | "
                       f"X:{ax_g:+.3f} Y:{ay_g:+.3f} Z:{az_g:+.3f} | "
                       f"Mag:{magnitude:.3f}g | {freq:.1f}Hz")
             
             return True
             
         except struct.error as e:
-            print(f"   ⚠️ Errore unpacking campione: {e}")
+            print(f"   Error unpacking sample: {e}")
             return False
 
     def detect_spike(self, ax, ay, az, mag, raw_data):
-        """Rileva VERI malfunzionamenti del sensore (non più frame di altri comandi)"""
-        # I precedenti "spike" erano frame di comandi diversi (0x38, 0x15, 0x75)
-        # Ora con filtro rigoroso su command=0x0C, rimangono solo veri problemi hardware
+        """Detect TRUE sensor malfunctions (not frames from other commands)"""
+        # Previous "spikes" were frames from different commands (0x38, 0x15, 0x75)
         
-        # Soglie MOLTO permissive - solo per malfunzionamenti gravi
-        MAX_PHYSICS_G = 50.0   # Limite fisico impossibile da superare
-        MIN_PHYSICS_MAG = 0.01 # Magnitudine minima fisicamente possibile
+        # VERY permissive thresholds - only for truly impossible hardware failures
+        MAX_PHYSICS_G = 50.0   # Physically impossible limit to exceed
+        MIN_PHYSICS_MAG = 0.01 # Minimum physically possible magnitude
         
-        # Solo spike hardware REALMENTE impossibili
+        # Only truly impossible hardware spikes
         is_spike = False
         
-        # Controllo limiti fisici estremi
+        # Extreme physical limit checks
         if (abs(ax) > MAX_PHYSICS_G or abs(ay) > MAX_PHYSICS_G or abs(az) > MAX_PHYSICS_G or
             mag > MAX_PHYSICS_G or mag < MIN_PHYSICS_MAG):
             is_spike = True
         
-        # Frame length sempre 10 per command 0x0C
+        # Frame length always 10 for command 0x0C
         if len(raw_data) != 10:
             is_spike = True
         
         return is_spike
 
     def notification_handler(self, sender, data):
-        """Gestisce le notifiche BLE - ULTRA LOW LATENCY"""
-        # 🚀 Processing immediato senza attesa - handler sincrono per min latency
-        # Non usare async qui perché aggiunge overhead nel BLE callback
+        """Handle BLE notifications - ULTRA LOW LATENCY"""
+        # Immediate processing without waiting - synchronous handler for min latency
+        # Don't use async here because it adds overhead in BLE callback
         try:
             self.parse_chileaf_data(data)
         except Exception as e:
-            # Logging minimo per non rallentare
-            print(f"⚠️ Handler error: {e}")
+            # Minimal logging to not slow down
+            print(f"Handler error: {e}")
 
     async def start_monitoring(self):
-        """Avvia il monitoraggio principale"""
-        print(f"\n🚀 Avvio monitoraggio accelerometro CL837")
+        """Start main monitoring"""
+        print("\nStarting CL837 accelerometer monitoring")
         print("=" * 60)
         
-        # Avvia oscilloscopio
+        # Start oscilloscope
         self.start_oscilloscope_thread()
         
-        # 🚀 OTTIMIZZAZIONE: Attivazione notifiche con priorità massima
-        print("🔔 Attivazione notifiche LOW-LATENCY...")
+        # OPTIMIZATION: Enable notifications with maximum priority
+        print("Enabling LOW-LATENCY notifications...")
         
-        # Flush eventuali dati bufferizzati prima di iniziare
+        # Flush any buffered data before starting
         try:
-            # Leggi eventuali caratteristiche cached per svuotare buffer
+            # Read any cached characteristics to empty buffers
             services = self.client.services
             for service in services:
                 if str(service.uuid).startswith('aae28f00'):
-                    print(f"   🧹 Flush cache servizio {service.uuid}")
+                    print(f"   Flush cache service {service.uuid}")
         except Exception:
             pass
             
         await self.client.start_notify(self.tx_char, self.notification_handler)
-        print("✅ Notifiche LOW-LATENCY attivate - Streaming in corso")
+        print("LOW-LATENCY notifications enabled - Streaming in progress")
         
-        # 🎯 Piccolo delay per stabilizzazione
+        # Small delay for stabilization
         await asyncio.sleep(0.1)
         
-        print("\n📊 MONITOR ATTIVO:")
-        print("   - Console: aggiornamenti ogni ~1 secondo")
-        print("   - Oscilloscopio: real-time a 20fps")
-        print("   - Premi Ctrl+C per fermare")
+        print("\nMONITOR ACTIVE:")
+        print("   - Console: updates every ~1 second")
+        print("   - Oscilloscope: real-time at 20fps")
+        print("   - Press Ctrl+C to stop")
         print("=" * 60)
         
         try:
-            # 🚀 LOW-LATENCY: Loop più reattivo per gestione eventi
+            # LOW-LATENCY: More responsive loop for event handling
             while True:
-                await asyncio.sleep(0.1)  # 10x più reattivo per Ctrl+C e gestione eventi
+                await asyncio.sleep(0.1)  # 10x more responsive for Ctrl+C and event handling
         except KeyboardInterrupt:
-            print("\n⚠️ Interruzione utente...")
+            print("\nUser interruption...")
         finally:
-            print("🔄 Disconnessione in corso...")
+            print("Disconnecting...")
             await self.client.stop_notify(self.tx_char)
 
     async def disconnect(self):
-        """Disconnetti dal dispositivo"""
+        """Disconnect from device"""
         if self.client and self.is_connected:
             await self.client.disconnect()
             
-            # Statistiche finali
+            # Final statistics
             total_time = time.time() - self.start_time
             avg_freq = self.sample_count / total_time if total_time > 0 else 0
             
-            print(f"\n📊 SESSIONE COMPLETATA:")
-            print(f"   Dispositivo: {self.device.name}")
-            print(f"   Durata: {total_time:.1f}s")
-            print(f"   Campioni: {self.sample_count:,}")
-            print(f"   Spike rilevati: {self.spike_count}")
+            print("\nSESSION COMPLETED:")
+            print(f"   Device: {self.device.name}")
+            print(f"   Duration: {total_time:.1f}s")
+            print(f"   Samples: {self.sample_count:,}")
+            print(f"   Detected spikes: {self.spike_count}")
             if self.sample_count > 0:
                 spike_percentage = (self.spike_count / self.sample_count) * 100
-                print(f"   Percentuale spike: {spike_percentage:.2f}%")
-            print(f"   Frequenza media: {avg_freq:.2f}Hz")
-            print(f"🔌 Disconnesso")
+                print(f"   Spike percentage: {spike_percentage:.2f}%")
+            print(f"   Average frequency: {avg_freq:.2f}Hz")
+            print("Disconnected")
             
-            # Mantieni oscilloscopio aperto
+            # Keep oscilloscope open
             if self.plot_ready:
-                print("📊 Oscilloscopio rimane aperto - chiudi la finestra per terminare")
-                input("Premi Enter per chiudere completamente...")
+                print("Oscilloscope remains open - close the window to terminate")
+                input("Press Enter to close completely...")
 
 async def main():
-    """Funzione principale"""
+    """Main function"""
     monitor = CL837UnifiedMonitor()
     
-    print("🚀 CL837 UNIFIED ACCELEROMETER MONITOR")
-    print("📊 Connessione + Monitor Console + Oscilloscopio Real-Time")
+    print("CL837 UNIFIED ACCELEROMETER MONITOR")
+    print("Connection + Console Monitor + Real-Time Oscilloscope")
     print("=" * 70)
     
     try:
-        # Fase 1: Connessione
+        # Phase 1: Connection
         if not await monitor.scan_and_connect():
             return
         
-        # Fase 2: Analisi servizi
+        # Phase 2: Service analysis
         if not await monitor.discover_services():
             return
         
-        # Fase 3: Monitoraggio
+        # Phase 3: Monitoring
         await monitor.start_monitoring()
         
     except Exception as e:
-        print(f"❌ Errore generale: {e}")
+        print(f"General error: {e}")
         import traceback
         traceback.print_exc()
     finally:
@@ -575,4 +572,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 Programma terminato")
+        print("\nProgram terminated")

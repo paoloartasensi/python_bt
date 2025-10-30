@@ -2,7 +2,7 @@
 
 Real-time monitoring and visualization tool for CL837 accelerometer devices using Chileaf BLE protocol.
 
-## 🚀 Features
+## Features
 
 - **Multi-device Support**: Interactive selection when multiple CL837 devices are detected
 - **Real-time Oscilloscope**: 4-panel visualization (XYZ, Magnitude, XY-View, Live Stats)
@@ -11,14 +11,14 @@ Real-time monitoring and visualization tool for CL837 accelerometer devices usin
 - **Smart Filtering**: Automatic rejection of non-accelerometer frames (0x38, 0x15, 0x75)
 - **Live Statistics**: Sample count, frequency, spike detection, device info
 
-## 📊 Visualizations
+## Visualizations
 
 1. **XYZ Acceleration Plot**: Real-time 3-axis accelerometer data
 2. **Magnitude Plot**: Total acceleration magnitude over time  
 3. **XY Top View**: 2D visualization from above (gravity plane)
 4. **Live Statistics**: Device info, sampling frequency, data quality metrics
 
-## 🛠️ Installation
+## Installation
 
 ### Prerequisites
 - Python 3.8+
@@ -37,7 +37,7 @@ pip install -r requirements.txt
 python cl837_unified.py
 ```
 
-## 🎯 Usage
+## Usage
 
 1. **Power on** your CL837 device
 2. **Run the script**: `python cl837_unified.py`
@@ -47,21 +47,21 @@ python cl837_unified.py
 
 ### Sample Output
 ```
-🚀 CL837 UNIFIED ACCELEROMETER MONITOR
-📊 Connessione + Monitor Console + Oscilloscopio Real-Time
+CL837 UNIFIED ACCELEROMETER MONITOR
+Connessione + Monitor Console + Oscilloscopio Real-Time
 ======================================================================
-🔍 Ricerca dispositivi CL837...
-✅ Trovati 2 dispositivi CL837:
+Ricerca dispositivi CL837...
+Trovati 2 dispositivi CL837:
    1. CL837-0758807 (CB:AB:D2:0D:2B:E7)  
    2. CL837-1234567 (AA:BB:CC:DD:EE:FF)
 
-🔢 Seleziona dispositivo (1-2) o 'q' per uscire:
-➤ 1
+Seleziona dispositivo (1-2) o 'q' per uscire:
+> 1
 
-📊 # 1500 | X:+0.094 Y:+0.000 Z:+0.938 | Mag:0.942g | 25.3Hz
+[DATA] # 1500 | X:+0.094 Y:+0.000 Z:+0.938 | Mag:0.942g | 25.3Hz
 ```
 
-## 🔧 Technical Details
+## Technical Details
 
 ### CL837 Protocol
 - **Service UUID**: `aae28f00-71b5-42a1-8c3c-f9cf6ac969d0`
@@ -74,12 +74,12 @@ python cl837_unified.py
 
 The CL837 device uses the **Chileaf protocol** which transmits multiple types of data frames over the same BLE characteristic. **Spikes** in accelerometer data were initially observed due to:
 
-#### 🔍 **Root Cause Analysis**
+#### **Root Cause Analysis**
 - **Mixed Protocol Frames**: CL837 sends different command frames (0x38, 0x15, 0x75) alongside accelerometer data (0x0C)
 - **Protocol Multiplexing**: All frame types use the same BLE notification channel
 - **False Parsing**: Non-accelerometer frames were incorrectly interpreted as sensor data
 
-#### ⚡ **Current Solution** 
+#### **Current Solution** 
 ```python
 # Strict filtering - only accelerometer frames (0x0C)
 if command == self.CHILEAF_CMD_ACCELEROMETER:
@@ -89,13 +89,13 @@ else:
     return False
 ```
 
-#### 📊 **Frame Types Observed**
+#### **Frame Types Observed**
 - **0x0C**: Accelerometer data (6-byte samples: X, Y, Z axes)
 - **0x38**: Device status/configuration frames (ignored)
 - **0x15**: Battery/system information (ignored)  
 - **0x75**: Firmware/diagnostic data (ignored)
 
-#### ✅ **Result**
+#### **Result**
 With proper protocol filtering, **spikes are eliminated** and only clean accelerometer data is processed. Any remaining spikes indicate genuine hardware issues (sensor malfunction, extreme G-forces >50g, etc.).
 
 ### Performance
@@ -105,7 +105,7 @@ With proper protocol filtering, **spikes are eliminated** and only clean acceler
 - **Visualization**: 25Hz refresh rate with blitting optimization
 - **Spike Rate**: <0.01% with proper filtering (hardware-only issues)
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 python_bt/
@@ -118,7 +118,7 @@ python_bt/
 └── README.md                # This file
 ```
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -156,7 +156,7 @@ def notification_handler(self, sender, data):
     self.parse_chileaf_data(data)
 ```
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
@@ -164,11 +164,11 @@ def notification_handler(self, sender, data):
 4. Push to the branch
 5. Create a Pull Request
 
-## 📄 License
+## License
 
 This project is open source. See the repository for license details.
 
-## 🔗 Related
+## Related
 
 - [Bleak BLE Library](https://github.com/hbldh/bleak)
 - [Matplotlib Documentation](https://matplotlib.org/)
