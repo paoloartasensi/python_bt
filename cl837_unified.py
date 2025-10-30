@@ -52,6 +52,7 @@ class CL837UnifiedMonitor:
         
         # Instantaneous frequency window
         self.freq_window = deque(maxlen=50)  # Window for instantaneous frequency
+        self.instant_freq = 0.0  # Current instantaneous frequency
         
         # Oscilloscope
         self.fig = None
@@ -336,17 +337,15 @@ class CL837UnifiedMonitor:
             return
             
         elapsed_time = time.time() - self.start_time
-        avg_frequency = self.sample_count / elapsed_time if elapsed_time > 0 else 0
         
         current_vals = self.last_values
         
-        # Usa frequenza istantanea invece di media cumulativa
         stats_text = f"""LIVE STATISTICS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Samples: {self.sample_count:,}
 Spikes: {self.spike_count}
 Time: {elapsed_time:.1f}s  
-Frequency: {self.instant_freq:.1f} Hz  # <- FREQUENZA ISTANTANEA
+Frequency: {self.instant_freq:.1f} Hz
 
 CURRENT VALUES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
