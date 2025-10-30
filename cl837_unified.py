@@ -60,53 +60,70 @@ class CL837UnifiedMonitor:
 
     async def scan_and_connect(self):
         """Scan and connect to CL837"""
-        print("Searching for CL837 devices...")
-        
-        devices = await BleakScanner.discover(timeout=8.0)
-        
-        cl837_devices = []
-        for device in devices:
-            if device.name and device.name.startswith("CL837"):
-                cl837_devices.append(device)
-        
-        if not cl837_devices:
-            print("No CL837 devices found")
-            print("Make sure the device is turned on and in pairing mode")
-            return False
-        
-        print(f"Found {len(cl837_devices)} CL837 devices:")
-        for i, device in enumerate(cl837_devices, 1):
-            print(f"   {i}. {device.name} ({device.address})")
-        
-        # INTERACTIVE DEVICE SELECTION
-        if len(cl837_devices) == 1:
-            # Only one available - direct connection
-            target_device = cl837_devices[0]
-            print(f"\nAutomatic connection to: {target_device.name}")
-        else:
-            # Multiple devices - ask user
-            while True:
-                try:
-                    print(f"\nSelect device (1-{len(cl837_devices)}) or 'q' to exit:")
-                    choice = input("> ").strip().lower()
-                    
-                    if choice == 'q':
-                        print("Connection cancelled")
-                        return False
-                    
-                    device_index = int(choice) - 1
-                    if 0 <= device_index < len(cl837_devices):
-                        target_device = cl837_devices[device_index]
-                        print(f"\nConnecting to: {target_device.name}")
-                        break
-                    else:
-                        print(f"Invalid choice. Enter a number between 1 and {len(cl837_devices)}")
-                        
-                except ValueError:
-                    print("Enter a valid number or 'q' to exit")
-                except KeyboardInterrupt:
-                    print("\nConnection cancelled")
+        while True:  # Loop for restart scan option
+            print("Searching for CL837 devices...")
+            
+            devices = await BleakScanner.discover(timeout=8.0)
+            
+            cl837_devices = []
+            for device in devices:
+                if device.name and device.name.startswith("CL837"):
+                    cl837_devices.append(device)
+            
+            if not cl837_devices:
+                print("No CL837 devices found")
+                print("Make sure the device is turned on and in pairing mode")
+                print("Options: 'r' to restart scan, 'q' to exit")
+                choice = input("> ").strip().lower()
+                if choice == 'q':
                     return False
+                elif choice == 'r':
+                    continue  # Restart scan
+                else:
+                    print("Invalid choice. Enter 'r' to restart scan or 'q' to exit")
+                    continue
+            
+            print(f"Found {len(cl837_devices)} CL837 devices:")
+            for i, device in enumerate(cl837_devices, 1):
+                print(f"   {i}. {device.name} ({device.address})")
+            
+            # INTERACTIVE DEVICE SELECTION
+            if len(cl837_devices) == 1:
+                # Only one available - direct connection
+                target_device = cl837_devices[0]
+                print(f"\nAutomatic connection to: {target_device.name}")
+                break  # Exit the scan loop
+            else:
+                # Multiple devices - ask user
+                while True:
+                    try:
+                        print(f"\nSelect device (1-{len(cl837_devices)}), 'r' to restart scan, or 'q' to exit:")
+                        choice = input("> ").strip().lower()
+                        
+                        if choice == 'q':
+                            print("Connection cancelled")
+                            return False
+                        elif choice == 'r':
+                            break  # Break inner loop to restart outer scan loop
+                        
+                        device_index = int(choice) - 1
+                        if 0 <= device_index < len(cl837_devices):
+                            target_device = cl837_devices[device_index]
+                            print(f"\nConnecting to: {target_device.name}")
+                            break  # Exit both loops
+                        else:
+                            print(f"Invalid choice. Enter a number between 1 and {len(cl837_devices)}, 'r' to restart scan, or 'q' to exit")
+                            
+                    except ValueError:
+                        print("Enter a valid number, 'r' to restart scan, or 'q' to exit")
+                    except KeyboardInterrupt:
+                        print("\nConnection cancelled")
+                        return False
+                
+                if choice == 'r':
+                    continue  # Restart scan
+                else:
+                    break  # Exit scan loop with selected device
         
         try:
             print("Connecting...")
