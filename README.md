@@ -173,3 +173,4 @@ This project is open source. See the repository for license details.
 - [Bleak BLE Library](https://github.com/hbldh/bleak)
 - [Matplotlib Documentation](https://matplotlib.org/)
 - [CL837 Device Manual](documentation/)
+
