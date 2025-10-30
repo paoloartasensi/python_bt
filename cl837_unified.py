@@ -79,7 +79,7 @@ class CL837UnifiedMonitor:
             
             if not cl837_devices:
                 print("No CL837 devices found")
-                print("Make sure the device is turned on and in pairing mode")
+                print("Make sure the device is turned on and in range")
                 print("Options: 'r' to restart scan, 'q' to exit")
                 choice = input("> ").strip().lower()
                 if choice == 'q':
@@ -385,15 +385,18 @@ DEVICE
 
     def parse_multi_sample_frame(self, data):
         """Parse Chileaf frame with possible multiple samples according to 0x0C doc"""
-        header = data[0]
-        length = data[1]
-        command = data[2]
+        # header = data[0]
+        # length = data[1]
+        # command = data[2]
                 
         # Calculate how many 6-byte samples are in the payload
         payload_bytes = len(data) - 3  # Exclude header, length, command
         samples_count = payload_bytes // 6
         remaining_bytes = payload_bytes % 6
         
+        if (remaining_bytes != 0):
+            print(f"   Warning: Incomplete sample detected - {remaining_bytes} extra bytes ignored")
+
         # Process all samples in the frame
         samples_processed = 0
         for i in range(samples_count):
@@ -513,15 +516,15 @@ DEVICE
         # OPTIMIZATION: Enable notifications with maximum priority
         print("Enabling LOW-LATENCY notifications...")
         
-        # Flush any buffered data before starting
-        try:
-            # Read any cached characteristics to empty buffers
-            services = self.client.services
-            for service in services:
-                if str(service.uuid).startswith('aae28f00'):
-                    print(f"   Flush cache service {service.uuid}")
-        except Exception:
-            pass
+        # # Flush any buffered data before starting
+        # try:
+        #     # Read any cached characteristics to empty buffers
+        #     services = self.client.services
+        #     for service in services:
+        #         if str(service.uuid).startswith('aae28f00'):
+        #             print(f"   Flush cache service {service.uuid}")
+        # except Exception:
+        #     pass
             
         await self.client.start_notify(self.tx_char, self.notification_handler)
         print("LOW-LATENCY notifications enabled - Streaming in progress")
