@@ -8,16 +8,11 @@ import struct
 import time
 import threading
 from collections import deque
-from datetime import datetime
 
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from matplotlib.figure import Figure
-import numpy as np
 
 from bleak import BleakClient, BleakScanner
-from bleak.backends.device import BLEDevice
-from bleak.backends.characteristic import BleakGATTCharacteristic
 
 class CL837UnifiedMonitor:
     """Unified CL837 monitor with integrated oscilloscope"""
@@ -42,17 +37,18 @@ class CL837UnifiedMonitor:
         self.y_data = deque(maxlen=self.max_samples)
         self.z_data = deque(maxlen=self.max_samples)
         self.magnitude_data = deque(maxlen=self.max_samples)
-        self.timestamps = deque(maxlen=self.max_samples)
         
         # Statistics
         self.sample_count = 0
         self.spike_count = 0
+        self.frame_count = 0  # BLE frames received
         self.start_time = time.time()
         self.last_values = {'x': 0, 'y': 0, 'z': 0, 'mag': 0}
         
-        # Instantaneous frequency window
-        self.freq_window = deque(maxlen=50)  # Window for instantaneous frequency
-        self.instant_freq = 0.0  # Current instantaneous frequency
+        # Instantaneous frequency tracking (based on BLE frames, not individual samples)
+        self.frame_freq_window = deque(maxlen=50)  # Window for frame frequency
+        self.instant_frame_freq = 0.0  # BLE frame frequency (Hz)
+        self.instant_sample_freq = 0.0  # Sample frequency (Hz) = frame_freq × samples_per_frame
         
         # Oscilloscope
         self.fig = None
@@ -61,9 +57,6 @@ class CL837UnifiedMonitor:
         self.animation = None
         self.plot_thread = None
         self.plot_ready = False
-
-        # Instantaneous frequency
-        self.instant_freq = 0.0  # Current instantaneous frequency
 
     async def scan_and_connect(self):
         """Scan and connect to CL837"""
@@ -343,9 +336,14 @@ class CL837UnifiedMonitor:
         stats_text = f"""LIVE STATISTICS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Samples: {self.sample_count:,}
+Frames: {self.frame_count:,}
 Spikes: {self.spike_count}
 Time: {elapsed_time:.1f}s  
-Frequency: {self.instant_freq:.1f} Hz
+
+FREQUENCY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BLE Frames: {self.instant_frame_freq:.1f} Hz
+Samples: {self.instant_sample_freq:.1f} Hz
 
 CURRENT VALUES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -385,11 +383,10 @@ DEVICE
 
     def parse_multi_sample_frame(self, data):
         """Parse Chileaf frame with possible multiple samples according to 0x0C doc"""
-        # header = data[0]
-        # length = data[1]
-        # command = data[2]
-        # checksum = data[length-1]
-                
+        # Track frame arrival time for frequency calculation
+        frame_time = time.time()
+        self.frame_count += 1
+        
         # Calculate how many 6-byte samples are in the payload
         payload_bytes = len(data) - 4  # Exclude header, length, command and checksum
         samples_count = payload_bytes // 6
@@ -404,15 +401,17 @@ DEVICE
             offset = 3 + (i * 6)  # 3 for header + i * 6 bytes per sample
             if offset + 6 <= len(data):
                 sample_data = data[offset:offset+6]
-                success = self.parse_single_sample(sample_data, data, sample_index=i+1, total_samples=samples_count)
+                # Pass frame_time only for first sample to avoid duplicate frequency calculation
+                is_first_sample = (i == 0)
+                success = self.parse_single_sample(sample_data, data, sample_index=i+1, 
+                                                   total_samples=samples_count, 
+                                                   frame_time=frame_time if is_first_sample else None)
                 if success:
                     samples_processed += 1
         
-        # Remaining bytes processed silently for speed
-        
         return samples_processed > 0
 
-    def parse_single_sample(self, accel_data, original_frame, sample_index=1, total_samples=1):
+    def parse_single_sample(self, accel_data, original_frame, sample_index=1, total_samples=1, frame_time=None):
         """Parse single accelerometer sample"""
         if len(accel_data) < 6:
             return False
@@ -440,24 +439,26 @@ DEVICE
                 print("   ---")
             
             # Add to oscilloscope buffers
-            current_time = time.time()
             self.x_data.append(ax_g)
             self.y_data.append(ay_g)
             self.z_data.append(az_g)
             self.magnitude_data.append(magnitude)
-            self.timestamps.append(current_time)
             
             # Update statistics
             self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
             self.sample_count += 1
             
-            # Instantaneous frequency calculation
-            self.freq_window.append(current_time)
-            if len(self.freq_window) >= 2:
-                time_span = self.freq_window[-1] - self.freq_window[0]
-                self.instant_freq = (len(self.freq_window) - 1) / time_span if time_span > 0 else 0
-            else:
-                self.instant_freq = 0
+            # Instantaneous frequency calculation (only for first sample of each frame)
+            if frame_time is not None:
+                self.frame_freq_window.append(frame_time)
+                if len(self.frame_freq_window) >= 2:
+                    time_span = self.frame_freq_window[-1] - self.frame_freq_window[0]
+                    self.instant_frame_freq = (len(self.frame_freq_window) - 1) / time_span if time_span > 0 else 0
+                    # Calculate sample frequency = frame_freq × samples_per_frame
+                    self.instant_sample_freq = self.instant_frame_freq * total_samples
+                else:
+                    self.instant_frame_freq = 0
+                    self.instant_sample_freq = 0
             
             # Detailed console output for multi-sample
             if total_samples > 1:
@@ -466,7 +467,7 @@ DEVICE
                 spike_marker = "SPIKE" if is_spike else "DATA"
                 print(f"[{spike_marker}] #{self.sample_count:>4} | "
                       f"X:{ax_g:+.3f} Y:{ay_g:+.3f} Z:{az_g:+.3f} | "
-                      f"Mag:{magnitude:.3f}g | {self.instant_freq:.1f}Hz")  # <- USA FREQUENZA ISTANTANEA
+                      f"Mag:{magnitude:.3f}g | Frame:{self.instant_frame_freq:.1f}Hz Sample:{self.instant_sample_freq:.1f}Hz")
             
             return True
             
@@ -516,16 +517,6 @@ DEVICE
         
         # OPTIMIZATION: Enable notifications with maximum priority
         print("Enabling LOW-LATENCY notifications...")
-        
-        # # Flush any buffered data before starting
-        # try:
-        #     # Read any cached characteristics to empty buffers
-        #     services = self.client.services
-        #     for service in services:
-        #         if str(service.uuid).startswith('aae28f00'):
-        #             print(f"   Flush cache service {service.uuid}")
-        # except Exception:
-        #     pass
             
         await self.client.start_notify(self.tx_char, self.notification_handler)
         print("LOW-LATENCY notifications enabled - Streaming in progress")
@@ -556,23 +547,35 @@ DEVICE
             
             # Final statistics
             total_time = time.time() - self.start_time
-            avg_freq = self.sample_count / total_time if total_time > 0 else 0
             
             print("\nSESSION COMPLETED:")
             print(f"   Device: {self.device.name}")
             print(f"   Duration: {total_time:.1f}s")
-            print(f"   Samples: {self.sample_count:,}")
+            print(f"   BLE Frames received: {self.frame_count:,}")
+            print(f"   Samples processed: {self.sample_count:,}")
             print(f"   Detected spikes: {self.spike_count}")
             if self.sample_count > 0:
                 spike_percentage = (self.spike_count / self.sample_count) * 100
                 print(f"   Spike percentage: {spike_percentage:.2f}%")
-            print(f"   Average frequency: {avg_freq:.2f}Hz")
+                avg_sample_freq = self.sample_count / total_time
+                avg_frame_freq = self.frame_count / total_time
+                avg_samples_per_frame = self.sample_count / self.frame_count if self.frame_count > 0 else 0
+                print(f"   Average BLE frame frequency: {avg_frame_freq:.2f}Hz")
+                print(f"   Average sample frequency: {avg_sample_freq:.2f}Hz")
+                print(f"   Average samples per frame: {avg_samples_per_frame:.1f}")
             print("Disconnected")
             
             # Keep oscilloscope open
             if self.plot_ready:
                 print("Oscilloscope remains open - close the window to terminate")
-                input("Press Enter to close completely...")
+                try:
+                    input("Press Enter to close completely...")
+                except (EOFError, KeyboardInterrupt):
+                    pass
+                finally:
+                    # Clean close of matplotlib
+                    if self.fig is not None:
+                        plt.close(self.fig)
 
 async def main():
     """Main function"""
@@ -602,7 +605,14 @@ async def main():
         await monitor.disconnect()
 
 if __name__ == "__main__":
+    import warnings
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nProgram terminated")
+    finally:
+        # Clean matplotlib/tkinter resources to avoid warnings
+        import matplotlib
+        matplotlib.pyplot.close('all')
