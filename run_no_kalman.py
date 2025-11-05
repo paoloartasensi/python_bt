@@ -1,6 +1,7 @@
 """
-CL837 Unified Accelerometer Monitor
+CL837 Unified Accelerometer Monitor - RAW DATA VERSION
 Connection, reading and real-time oscilloscope visualization
+NO FILTERING - Direct sensor data
 """
 
 import asyncio
@@ -8,7 +9,6 @@ import struct
 import time
 import threading
 from collections import deque
-import numpy as np
 
 import matplotlib
 matplotlib.use('TkAgg')  # Use TkAgg backend which works better with threading
@@ -17,55 +17,8 @@ import matplotlib.animation as animation
 
 from bleak import BleakClient, BleakScanner
 
-class KalmanFilter1D:
-    """Simple 1D Kalman Filter for accelerometer data"""
-    def __init__(self, process_variance=0.001, measurement_variance=0.1, estimate_error=1.0):
-        """
-        Initialize Kalman Filter
-        
-        Args:
-            process_variance: How much we expect the value to change (Q)
-            measurement_variance: Sensor noise variance (R)
-            estimate_error: Initial estimate error (P)
-        """
-        self.process_variance = process_variance  # Q
-        self.measurement_variance = measurement_variance  # R
-        self.estimate_error = estimate_error  # P
-        self.estimate = 0.0  # x_hat
-        self.is_initialized = False
-    
-    def update(self, measurement):
-        """Update filter with new measurement"""
-        if not self.is_initialized:
-            self.estimate = measurement
-            self.is_initialized = True
-            return self.estimate
-        
-        # Prediction step
-        # x_hat_minus = x_hat (assuming constant value)
-        # P_minus = P + Q
-        self.estimate_error += self.process_variance
-        
-        # Update step
-        # K = P_minus / (P_minus + R)
-        kalman_gain = self.estimate_error / (self.estimate_error + self.measurement_variance)
-        
-        # x_hat = x_hat_minus + K * (z - x_hat_minus)
-        self.estimate = self.estimate + kalman_gain * (measurement - self.estimate)
-        
-        # P = (1 - K) * P_minus
-        self.estimate_error = (1.0 - kalman_gain) * self.estimate_error
-        
-        return self.estimate
-    
-    def reset(self):
-        """Reset the filter"""
-        self.estimate = 0.0
-        self.estimate_error = 1.0
-        self.is_initialized = False
-
 class CL837UnifiedMonitor:
-    """Unified CL837 monitor with integrated oscilloscope"""
+    """Unified CL837 monitor with integrated oscilloscope - RAW DATA"""
     
     def __init__(self):
         # BLE Connection
@@ -81,20 +34,12 @@ class CL837UnifiedMonitor:
         self.CHILEAF_CMD_ACCELEROMETER = 0x0C
         self.CHILEAF_CONVERSION_FACTOR = 4096.0
         
-        # Oscilloscope Data
+        # Oscilloscope Data - RAW (no filtering)
         self.max_samples = 300   # Reduced window for lower latency (~12 sec at 25Hz)
         self.x_data = deque(maxlen=self.max_samples)
         self.y_data = deque(maxlen=self.max_samples)
         self.z_data = deque(maxlen=self.max_samples)
         self.magnitude_data = deque(maxlen=self.max_samples)
-        
-        # Kalman filters for each axis (more effective than moving average)
-        # Tuning parameters:
-        # - process_variance (Q): lower = smoother, higher = more responsive
-        # - measurement_variance (R): based on sensor noise characteristics
-        self.kalman_x = KalmanFilter1D(process_variance=0.001, measurement_variance=0.05)
-        self.kalman_y = KalmanFilter1D(process_variance=0.001, measurement_variance=0.05)
-        self.kalman_z = KalmanFilter1D(process_variance=0.001, measurement_variance=0.05)
         
         # Statistics
         self.sample_count = 0
@@ -263,20 +208,20 @@ class CL837UnifiedMonitor:
         
         # Create figure with subplots
         self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle("CL837 Accelerometer Oscilloscope - Real Time", fontsize=16)
+        self.fig.suptitle("CL837 Accelerometer Oscilloscope - RAW DATA (No Filtering)", fontsize=16)
         
         # Configure axes
         ax_xyz, ax_mag, ax_xy, ax_stats = self.axes.flatten()
         
         # XYZ plot
-        ax_xyz.set_title("XYZ Acceleration (g)")
+        ax_xyz.set_title("XYZ Acceleration (g) - RAW")
         ax_xyz.set_xlabel("Samples")
         ax_xyz.set_ylabel("Acceleration (g)")
         ax_xyz.grid(True, alpha=0.3)
         ax_xyz.legend(['X', 'Y', 'Z'])
         
         # Magnitude plot
-        ax_mag.set_title("Total Magnitude")
+        ax_mag.set_title("Total Magnitude - RAW")
         ax_mag.set_xlabel("Samples")
         ax_mag.set_ylabel("Magnitude (g)")
         ax_mag.grid(True, alpha=0.3)
@@ -395,7 +340,7 @@ class CL837UnifiedMonitor:
         
         current_vals = self.last_values
         
-        stats_text = f"""LIVE STATISTICS
+        stats_text = f"""LIVE STATISTICS (RAW DATA)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Samples: {self.sample_count:,}
 Frames: {self.frame_count:,}
@@ -407,7 +352,7 @@ FREQUENCY
 BLE Frames: {self.instant_frame_freq:.1f} Hz
 Samples: {self.instant_sample_freq:.1f} Hz
 
-CURRENT VALUES
+CURRENT VALUES (RAW)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 X: {current_vals['x']:+.3f}g
 Y: {current_vals['y']:+.3f}g  
@@ -474,7 +419,7 @@ DEVICE
         return samples_processed > 0
 
     def parse_single_sample(self, accel_data, original_frame, sample_index=1, total_samples=1, frame_time=None):
-        """Parse single accelerometer sample"""
+        """Parse single accelerometer sample - RAW DATA (no filtering)"""
         if len(accel_data) < 6:
             return False
         
@@ -482,18 +427,13 @@ DEVICE
             # Accelerometer parsing (6 bytes = 3 axes x 2 bytes int16 little-endian)
             rawAX, rawAY, rawAZ = struct.unpack('<hhh', accel_data)
             
-            # Convert to g-force
+            # Convert to g-force - RAW, NO FILTERING
             ax_g = rawAX / self.CHILEAF_CONVERSION_FACTOR
             ay_g = rawAY / self.CHILEAF_CONVERSION_FACTOR
             az_g = rawAZ / self.CHILEAF_CONVERSION_FACTOR
+            magnitude = (ax_g**2 + ay_g**2 + az_g**2)**0.5
             
-            # Apply Kalman filter to reduce noise while preserving dynamics
-            ax_g_filtered = self.kalman_x.update(ax_g)
-            ay_g_filtered = self.kalman_y.update(ay_g)
-            az_g_filtered = self.kalman_z.update(az_g)
-            magnitude = (ax_g_filtered**2 + ay_g_filtered**2 + az_g_filtered**2)**0.5
-            
-            # SPIKE DETECTION FILTER (using raw values)
+            # SPIKE DETECTION FILTER
             is_spike = self.detect_spike(ax_g, ay_g, az_g, magnitude, original_frame)
             
             if is_spike and total_samples == 1:  # Only for single samples
@@ -505,14 +445,14 @@ DEVICE
                 print(f"   G values: X={ax_g:+.3f} Y={ay_g:+.3f} Z={az_g:+.3f} Mag={magnitude:.3f}")
                 print("   ---")
             
-            # Add filtered values to oscilloscope buffers
-            self.x_data.append(ax_g_filtered)
-            self.y_data.append(ay_g_filtered)
-            self.z_data.append(az_g_filtered)
+            # Add RAW values to oscilloscope buffers (no filtering)
+            self.x_data.append(ax_g)
+            self.y_data.append(ay_g)
+            self.z_data.append(az_g)
             self.magnitude_data.append(magnitude)
             
-            # Update statistics with filtered values
-            self.last_values = {'x': ax_g_filtered, 'y': ay_g_filtered, 'z': az_g_filtered, 'mag': magnitude}
+            # Update statistics with RAW values
+            self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
             self.sample_count += 1
             
             # Instantaneous frequency calculation (only for first sample of each frame)
@@ -529,11 +469,11 @@ DEVICE
             
             # Detailed console output for multi-sample
             if total_samples > 1:
-                print(f"   Sample {sample_index}/{total_samples}: X:{ax_g_filtered:+.3f} Y:{ay_g_filtered:+.3f} Z:{az_g_filtered:+.3f} Mag:{magnitude:.3f}g")
+                print(f"   Sample {sample_index}/{total_samples}: X:{ax_g:+.3f} Y:{ay_g:+.3f} Z:{az_g:+.3f} Mag:{magnitude:.3f}g")
             elif self.sample_count % 15 == 0:  # More frequent output for responsiveness
-                spike_marker = "SPIKE" if is_spike else "DATA"
+                spike_marker = "SPIKE" if is_spike else "RAW"
                 print(f"[{spike_marker}] #{self.sample_count:>4} | "
-                      f"X:{ax_g_filtered:+.3f} Y:{ay_g_filtered:+.3f} Z:{az_g_filtered:+.3f} | "
+                      f"X:{ax_g:+.3f} Y:{ay_g:+.3f} Z:{az_g:+.3f} | "
                       f"Mag:{magnitude:.3f}g | Frame:{self.instant_frame_freq:.1f}Hz Sample:{self.instant_sample_freq:.1f}Hz")
             
             return True
@@ -576,7 +516,7 @@ DEVICE
 
     async def start_monitoring(self):
         """Start main monitoring"""
-        print("\nStarting CL837 accelerometer monitoring")
+        print("\nStarting CL837 accelerometer monitoring - RAW DATA MODE")
         print("=" * 60)
         
         # Start oscilloscope
@@ -591,7 +531,7 @@ DEVICE
         # Small delay for stabilization
         await asyncio.sleep(0.1)
         
-        print("\nMONITOR ACTIVE:")
+        print("\nMONITOR ACTIVE (RAW DATA - NO FILTERING):")
         print("   - Console: updates every ~1 second")
         print("   - Oscilloscope: real-time at 20fps")
         print("   - Press Ctrl+C to stop")
@@ -648,8 +588,9 @@ async def main():
     """Main function"""
     monitor = CL837UnifiedMonitor()
     
-    print("CL837 UNIFIED ACCELEROMETER MONITOR")
+    print("CL837 UNIFIED ACCELEROMETER MONITOR - RAW DATA VERSION")
     print("Connection + Console Monitor + Real-Time Oscilloscope")
+    print("NO FILTERING - Direct sensor data")
     print("=" * 70)
     
     try:
