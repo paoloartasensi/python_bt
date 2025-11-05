@@ -54,7 +54,7 @@ class CL837UnifiedMonitor:
         self.instant_sample_freq = 0.0  # Sample frequency (Hz) = frame_freq × samples_per_frame
         
         # Adaptive oscilloscope refresh rate
-        self.refresh_interval = 50  # Start with 50ms (20fps), will auto-adjust
+        self.refresh_interval = 17  # Start with ~60fps for smoothness
         
         # Oscilloscope
         self.fig = None
@@ -67,13 +67,13 @@ class CL837UnifiedMonitor:
     def calculate_optimal_refresh_rate(self):
         """Calculate optimal oscilloscope refresh rate based on sensor frequency"""
         if self.instant_sample_freq > 0:
-            # Refresh rate should be 2-3x the sample rate for smooth display
-            # But capped between 10-60 fps for performance
-            optimal_fps = min(60, max(10, self.instant_sample_freq * 2.5))
-            optimal_interval = int(1000 / optimal_fps)  # Convert to milliseconds
+            # Refresh rate should be HIGHER than sample rate for smooth display
+            # Aim for 60fps for maximum smoothness
+            optimal_fps = 60  # Always 60fps for smoothest possible scrolling
+            optimal_interval = int(1000 / optimal_fps)  # ~16ms
             return optimal_interval
         else:
-            return 50  # Default 20fps if no data yet
+            return 17  # ~60fps default
 
     async def scan_and_connect(self):
         """Scan and connect to CL837"""
@@ -222,23 +222,25 @@ class CL837UnifiedMonitor:
         
         # Create figure with subplots
         self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle("CL837 Accelerometer - RAW DATA (Adaptive Refresh)", fontsize=16)
+        self.fig.suptitle("CL837 Accelerometer - RAW DATA @ 60fps", fontsize=16)
         
         # Configure axes
         ax_xyz, ax_mag, ax_xy, ax_stats = self.axes.flatten()
         
-        # XYZ plot
+        # XYZ plot - FIXED Y LIMITS for smooth scrolling, X scrolls
         ax_xyz.set_title("XYZ Acceleration (g) - RAW")
         ax_xyz.set_xlabel("Samples")
         ax_xyz.set_ylabel("Acceleration (g)")
         ax_xyz.grid(True, alpha=0.3)
         ax_xyz.legend(['X', 'Y', 'Z'])
+        ax_xyz.set_ylim(-2, 2)   # Fixed Y range
         
-        # Magnitude plot
+        # Magnitude plot - FIXED Y LIMITS
         ax_mag.set_title("Total Magnitude - RAW")
         ax_mag.set_xlabel("Samples")
         ax_mag.set_ylabel("Magnitude (g)")
         ax_mag.grid(True, alpha=0.3)
+        ax_mag.set_ylim(0, 2.5)  # Fixed range
         
         # XY plot (top view)
         ax_xy.set_title("XY View (from top)")
@@ -296,19 +298,9 @@ class CL837UnifiedMonitor:
         print("Oscilloscope started in separate thread")
 
     def update_plot(self, frame):
-        """Update oscilloscope plots with smooth scrolling and adaptive refresh"""
+        """Update oscilloscope plots with CONTINUOUS smooth scrolling at 60fps"""
         if len(self.x_data) < 2:
             return self.lines
-        
-        # Dynamically adjust refresh rate based on sensor frequency (every 50 frames)
-        if frame % 50 == 0 and self.instant_sample_freq > 0:
-            new_interval = self.calculate_optimal_refresh_rate()
-            if abs(new_interval - self.refresh_interval) > 5:  # Only update if significant change
-                self.refresh_interval = new_interval
-                if self.animation:
-                    self.animation.event_source.interval = new_interval
-                    current_fps = 1000 / new_interval
-                    print(f"   Oscilloscope refresh adapted to {current_fps:.1f}fps (sensor: {self.instant_sample_freq:.1f}Hz)")
         
         # Convert deque to lists for matplotlib
         x_list = list(self.x_data)
@@ -316,17 +308,40 @@ class CL837UnifiedMonitor:
         z_list = list(self.z_data)
         mag_list = list(self.magnitude_data)
         
-        # Create indices for x-axis
         num_samples = len(x_list)
-        indices = list(range(num_samples))
         
-        # Update XYZ lines
-        self.lines[0].set_data(indices, x_list)  # X
-        self.lines[1].set_data(indices, y_list)  # Y
-        self.lines[2].set_data(indices, z_list)  # Z
+        # CONTINUOUS SCROLLING: Always show last 200 samples
+        window_size = 200
         
-        # Update magnitude
-        self.lines[3].set_data(indices, mag_list)
+        if num_samples >= window_size:
+            # Full window - show last 200
+            plot_x = x_list[-window_size:]
+            plot_y = y_list[-window_size:]
+            plot_z = z_list[-window_size:]
+            plot_mag = mag_list[-window_size:]
+            # X axis scrolls continuously
+            x_min = num_samples - window_size
+            x_max = num_samples
+            indices = list(range(x_min, x_max))
+        else:
+            # Growing phase
+            plot_x = x_list
+            plot_y = y_list
+            plot_z = z_list
+            plot_mag = mag_list
+            x_min = 0
+            x_max = max(num_samples, 10)
+            indices = list(range(num_samples))
+        
+        # Update lines data
+        self.lines[0].set_data(indices, plot_x)  # X
+        self.lines[1].set_data(indices, plot_y)  # Y
+        self.lines[2].set_data(indices, plot_z)  # Z
+        self.lines[3].set_data(indices, plot_mag)
+        
+        # Update X limits EVERY FRAME for smooth continuous scrolling
+        self.axes[0, 0].set_xlim(x_min, x_max)
+        self.axes[0, 1].set_xlim(x_min, x_max)
         
         # Update XY view (last 50 points)
         if len(x_list) > 50:
@@ -337,40 +352,8 @@ class CL837UnifiedMonitor:
             xy_y = y_list
         self.lines[4].set_data(xy_x, xy_y)
         
-        # Update axes limits ONLY when needed (reduces stuttering)
-        # Only update every 10 frames or when significantly changed
-        if frame % 10 == 0:
-            if num_samples > 200:
-                x_min = num_samples - 200
-                x_max = num_samples
-            else:
-                x_min = 0
-                x_max = max(num_samples, 10)
-            
-            # XYZ plot
-            self.axes[0, 0].set_xlim(x_min, x_max)
-            
-            visible_x = x_list[-200:] if num_samples > 200 else x_list
-            visible_y = y_list[-200:] if num_samples > 200 else y_list
-            visible_z = z_list[-200:] if num_samples > 200 else z_list
-            all_visible = visible_x + visible_y + visible_z
-            
-            if all_visible:
-                y_min, y_max = min(all_visible), max(all_visible)
-                margin = max((y_max - y_min) * 0.1, 0.1)
-                self.axes[0, 0].set_ylim(y_min - margin, y_max + margin)
-            
-            # Magnitude plot
-            self.axes[0, 1].set_xlim(x_min, x_max)
-            
-            visible_mag = mag_list[-200:] if num_samples > 200 else mag_list
-            if visible_mag:
-                mag_min, mag_max = min(visible_mag), max(visible_mag)
-                margin = max((mag_max - mag_min) * 0.1, 0.1)
-                self.axes[0, 1].set_ylim(mag_min - margin, mag_max + margin)
-        
-        # Update statistics (less frequently to reduce overhead)
-        if frame % 20 == 0:
+        # Update statistics less frequently
+        if frame % 30 == 0:
             self.update_statistics_display()
         
         return self.lines + [self.stats_text]
