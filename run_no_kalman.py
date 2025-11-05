@@ -53,6 +53,9 @@ class CL837UnifiedMonitor:
         self.instant_frame_freq = 0.0  # BLE frame frequency (Hz)
         self.instant_sample_freq = 0.0  # Sample frequency (Hz) = frame_freq × samples_per_frame
         
+        # Adaptive oscilloscope refresh rate
+        self.refresh_interval = 50  # Start with 50ms (20fps), will auto-adjust
+        
         # Oscilloscope
         self.fig = None
         self.axes = None
@@ -60,6 +63,17 @@ class CL837UnifiedMonitor:
         self.animation = None
         self.plot_thread = None
         self.plot_ready = False
+
+    def calculate_optimal_refresh_rate(self):
+        """Calculate optimal oscilloscope refresh rate based on sensor frequency"""
+        if self.instant_sample_freq > 0:
+            # Refresh rate should be 2-3x the sample rate for smooth display
+            # But capped between 10-60 fps for performance
+            optimal_fps = min(60, max(10, self.instant_sample_freq * 2.5))
+            optimal_interval = int(1000 / optimal_fps)  # Convert to milliseconds
+            return optimal_interval
+        else:
+            return 50  # Default 20fps if no data yet
 
     async def scan_and_connect(self):
         """Scan and connect to CL837"""
@@ -208,7 +222,7 @@ class CL837UnifiedMonitor:
         
         # Create figure with subplots
         self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle("CL837 Accelerometer Oscilloscope - RAW DATA (No Filtering)", fontsize=16)
+        self.fig.suptitle("CL837 Accelerometer - RAW DATA (Adaptive Refresh)", fontsize=16)
         
         # Configure axes
         ax_xyz, ax_mag, ax_xy, ax_stats = self.axes.flatten()
@@ -257,11 +271,14 @@ class CL837UnifiedMonitor:
         print("Oscilloscope configured")
 
     def start_oscilloscope_thread(self):
-        """Start oscilloscope in separate thread"""
+        """Start oscilloscope in separate thread with adaptive refresh"""
         def run_plot():
             self.setup_oscilloscope()
+            # Use adaptive interval that updates based on sensor frequency
+            # blit=True for better performance (only redraw changed elements)
             self.animation = animation.FuncAnimation(
-                self.fig, self.update_plot, interval=25, blit=True)  # 40Hz refresh + blitting for performance
+                self.fig, self.update_plot, interval=self.refresh_interval, 
+                blit=True, cache_frame_data=False)
             self.plot_ready = True
             # Use non-blocking show to avoid threading issues
             plt.show(block=False)
@@ -279,9 +296,19 @@ class CL837UnifiedMonitor:
         print("Oscilloscope started in separate thread")
 
     def update_plot(self, frame):
-        """Update oscilloscope plots"""
+        """Update oscilloscope plots with smooth scrolling and adaptive refresh"""
         if len(self.x_data) < 2:
             return self.lines
+        
+        # Dynamically adjust refresh rate based on sensor frequency (every 50 frames)
+        if frame % 50 == 0 and self.instant_sample_freq > 0:
+            new_interval = self.calculate_optimal_refresh_rate()
+            if abs(new_interval - self.refresh_interval) > 5:  # Only update if significant change
+                self.refresh_interval = new_interval
+                if self.animation:
+                    self.animation.event_source.interval = new_interval
+                    current_fps = 1000 / new_interval
+                    print(f"   Oscilloscope refresh adapted to {current_fps:.1f}fps (sensor: {self.instant_sample_freq:.1f}Hz)")
         
         # Convert deque to lists for matplotlib
         x_list = list(self.x_data)
@@ -290,7 +317,8 @@ class CL837UnifiedMonitor:
         mag_list = list(self.magnitude_data)
         
         # Create indices for x-axis
-        indices = list(range(len(x_list)))
+        num_samples = len(x_list)
+        indices = list(range(num_samples))
         
         # Update XYZ lines
         self.lines[0].set_data(indices, x_list)  # X
@@ -309,25 +337,41 @@ class CL837UnifiedMonitor:
             xy_y = y_list
         self.lines[4].set_data(xy_x, xy_y)
         
-        # Update axes limits automatically
-        if indices:
+        # Update axes limits ONLY when needed (reduces stuttering)
+        # Only update every 10 frames or when significantly changed
+        if frame % 10 == 0:
+            if num_samples > 200:
+                x_min = num_samples - 200
+                x_max = num_samples
+            else:
+                x_min = 0
+                x_max = max(num_samples, 10)
+            
             # XYZ plot
-            self.axes[0, 0].set_xlim(max(0, len(indices)-200), len(indices))
-            all_values = x_list + y_list + z_list
-            if all_values:
-                y_min, y_max = min(all_values), max(all_values)
-                margin = (y_max - y_min) * 0.1 + 0.1
+            self.axes[0, 0].set_xlim(x_min, x_max)
+            
+            visible_x = x_list[-200:] if num_samples > 200 else x_list
+            visible_y = y_list[-200:] if num_samples > 200 else y_list
+            visible_z = z_list[-200:] if num_samples > 200 else z_list
+            all_visible = visible_x + visible_y + visible_z
+            
+            if all_visible:
+                y_min, y_max = min(all_visible), max(all_visible)
+                margin = max((y_max - y_min) * 0.1, 0.1)
                 self.axes[0, 0].set_ylim(y_min - margin, y_max + margin)
             
             # Magnitude plot
-            self.axes[0, 1].set_xlim(max(0, len(indices)-200), len(indices))
-            if mag_list:
-                mag_min, mag_max = min(mag_list), max(mag_list)
-                margin = (mag_max - mag_min) * 0.1 + 0.1
+            self.axes[0, 1].set_xlim(x_min, x_max)
+            
+            visible_mag = mag_list[-200:] if num_samples > 200 else mag_list
+            if visible_mag:
+                mag_min, mag_max = min(visible_mag), max(visible_mag)
+                margin = max((mag_max - mag_min) * 0.1, 0.1)
                 self.axes[0, 1].set_ylim(mag_min - margin, mag_max + margin)
         
-        # Update statistics
-        self.update_statistics_display()
+        # Update statistics (less frequently to reduce overhead)
+        if frame % 20 == 0:
+            self.update_statistics_display()
         
         return self.lines + [self.stats_text]
 
