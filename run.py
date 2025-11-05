@@ -9,6 +9,8 @@ import time
 import threading
 from collections import deque
 
+import matplotlib
+matplotlib.use('TkAgg')  # Use TkAgg backend which works better with threading
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
@@ -260,7 +262,11 @@ class CL837UnifiedMonitor:
             self.animation = animation.FuncAnimation(
                 self.fig, self.update_plot, interval=25, blit=True)  # 40Hz refresh + blitting for performance
             self.plot_ready = True
-            plt.show()
+            # Use non-blocking show to avoid threading issues
+            plt.show(block=False)
+            # Keep the plot window responsive
+            while plt.fignum_exists(self.fig.number):
+                plt.pause(0.1)
         
         self.plot_thread = threading.Thread(target=run_plot, daemon=True)
         self.plot_thread.start()
