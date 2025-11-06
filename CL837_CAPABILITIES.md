@@ -1,6 +1,12 @@
 # CL837 Device Capabilities
 
-Based on testing with actual CL837 hardware, here's what works and what doesn't:
+Based on testing with actual CL837 hardware and comparison with official Android/iOS SDKs.
+
+**See also:** [SDK_COMPARISON_ANALYSIS.md](SDK_COMPARISON_ANALYSIS.md) for detailed SDK code analysis.
+
+## Key Finding
+
+**Both Android and iOS SDKs support HR/RR history commands (0x21, 0x22, 0x24, 0x25)**, but the **CL837 device does NOT respond** to these commands. This is a **hardware/firmware limitation**, not a protocol issue. The SDKs are designed for the entire Chileaf product line, including higher-end models that DO support these features.
 
 ## ✅ WORKING FEATURES (Confirmed)
 
