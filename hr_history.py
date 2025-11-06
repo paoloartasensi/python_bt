@@ -1,6 +1,14 @@
 """
 CL837 Heart Rate History Download
 Connection, UTC sync, and HR data retrieval
+
+⚠️ NOTE: The CL837 model does NOT store HR history on the device.
+It only provides real-time HR via the standard BLE HR Service (UUID 00002a37).
+This script will NOT work on CL837 devices.
+
+For real-time HR monitoring, use realtime_monitor.py instead.
+
+This script may work on other Chileaf models that support command 0x21.
 """
 import asyncio
 import time

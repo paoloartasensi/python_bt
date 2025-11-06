@@ -1,6 +1,12 @@
 """
 CL837 Respiratory Rate History Download
 RR records and detailed respiratory rate data
+
+⚠️ NOTE: The CL837 model does NOT store RR (respiratory rate) history on the device.
+Real-time health data (including respiratory rate) may be available via push notifications
+in realtime_monitor.py (command 0x02 - health data).
+
+This script may work on other Chileaf models that support commands 0x24/0x25.
 """
 import asyncio
 import time
