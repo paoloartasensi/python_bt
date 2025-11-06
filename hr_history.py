@@ -152,6 +152,9 @@ class CL837HRMonitor:
             length = data[1]
             cmd = data[2]
             
+            # DEBUG: Print all received packets
+            print(f"[DEBUG] Received: header=0x{header:02X}, len={length}, cmd=0x{cmd:02X}, data={data.hex()}")
+            
             if header != self.CHILEAF_HEADER:
                 return
             
@@ -166,6 +169,8 @@ class CL837HRMonitor:
             # Response to SET_UTC (0x08)
             elif cmd == self.CMD_SET_UTC:
                 print("  ✓ UTC time synchronized")
+            else:
+                print(f"[DEBUG] Unknown command: 0x{cmd:02X}")
                 
         except Exception as e:
             print(f"Notification handler error: {e}")
