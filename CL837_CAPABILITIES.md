@@ -50,16 +50,32 @@ Based on testing with actual CL837 hardware and comparison with official Android
 ### 1. HR History (`hr_history.py`)
 - **Commands:** 0x21 (records), 0x22 (data)
 - **Status:** ❌ NOT SUPPORTED on CL837
+- **SDK Evidence:** 
+  - Android SDK has `mManager.getHistoryOfHRRecord()` method (WearManager.java line 684)
+  - iOS SDK has full parsing logic for 0x21/0x22/0x23 responses (HeartBLEDevice.m line 555-704)
+  - **But CL837 device doesn't respond** - confirmed by testing with debug logging
 - **Reason:** Device doesn't respond to command 0x21, doesn't store HR history
 - **Alternative:** Use `realtime_monitor.py` for live HR readings via BLE HR service
-- **Note:** May work on other Chileaf models with more memory
+- **Note:** Higher-end models (CL838+) likely support this feature
 
 ### 2. Respiratory Rate History (`rr_history.py`)
 - **Commands:** 0x24 (records), 0x25 (data)
 - **Status:** ❌ LIKELY NOT SUPPORTED on CL837
-- **Reason:** Device doesn't store RR history
+- **SDK Evidence:**
+  - Android SDK has `mManager.getHistoryOfRRRecord()` method (WearManager.java line 694)
+  - Similar structure to HR history commands
+- **Reason:** Device doesn't store RR history (same limitation as HR)
 - **Alternative:** Real-time RR may be available in health data push notifications (cmd 0x02)
 - **Note:** May work on other Chileaf models
+
+### Why These Commands Exist in SDKs
+
+The official SDKs support the **complete Chileaf protocol specification** for all device models:
+- **CL831/CL833:** Entry-level models
+- **CL837:** Mid-range (our tested device)
+- **CL838/CL839/CL880N:** High-end models with more memory
+
+**The CL837 is a subset implementation** - it only responds to commands its hardware can support. The SDK code is correct; it's the device firmware that selectively implements features based on available memory and target price point.
 
 ## 📊 Debug Output Analysis
 
@@ -123,12 +139,17 @@ The CL837 appears to have limited storage:
 - [ ] user_info.py - Not yet tested
 - [ ] realtime_monitor.py - Not yet tested (should work)
 
-## 📱 Comparison to Android App
+## 📱 Comparison to Android/iOS Apps
 
-The official Android app likely:
-1. Uses real-time HR service for live readings
-2. May display HR "history" by storing readings in the phone's database (not device)
-3. Shows same historical data we can access (sleep, sport, steps)
-4. Uses push notifications for real-time dashboard
+The official Android and iOS apps likely:
+1. Use real-time HR service for live readings (BLE UUID 00002a37)
+2. **Store readings locally** in the phone's database (SQLite on Android, CoreData on iOS)
+3. Show "HR history" from **phone storage**, not device storage
+4. Continuously sync and cache data while connected
 
-**The device itself doesn't store HR history** - any historical HR data in the app is stored on the phone, not the CL837.
+**Evidence from SDKs:**
+- Android app (HistoryActivity.java) calls `mManager.getHistoryOfHRRecord()`
+- iOS SDK subscribes to real-time HR: `[peripheral setNotifyValue:YES forCharacteristic:characteristic]`
+- **But on CL837, the HR history command returns nothing** - apps must rely on locally cached real-time data
+
+**The device itself doesn't store HR history** - any historical HR data in the official apps is stored on the phone, not the CL837. The apps build the history by logging real-time readings over time.

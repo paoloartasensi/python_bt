@@ -2,13 +2,22 @@
 CL837 Heart Rate History Download
 Connection, UTC sync, and HR data retrieval
 
-⚠️ NOTE: The CL837 model does NOT store HR history on the device.
-It only provides real-time HR via the standard BLE HR Service (UUID 00002a37).
-This script will NOT work on CL837 devices.
+⚠️ NOTE: The CL837 device does NOT respond to HR history commands (0x21/0x22).
+Testing shows the device completely ignores these commands despite them being 
+documented in the Android SDK (WearManager.java).
 
-For real-time HR monitoring, use realtime_monitor.py instead.
+This script will NOT work on CL837 devices - confirmed by:
+- Sending command 0x21 (get HR records)
+- Device only responds with: accelerometer (0x0C), temperature (0x38), 
+  sport data (0x15), health metrics (0x75)
+- No 0x21 or 0x22 responses after 200+ test packets
 
-This script may work on other Chileaf models that support command 0x21.
+For HR monitoring on CL837, use realtime_monitor.py to access:
+- Real-time HR via standard BLE HR Service (UUID 00002a37)
+- Or real-time health data via Chileaf push notifications
+
+This script may work on higher-end Chileaf models (CL838, CL839, etc.)
+that have more memory and support command 0x21.
 """
 import asyncio
 import time
