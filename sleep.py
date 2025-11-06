@@ -6,6 +6,7 @@ import asyncio
 import time
 import struct
 import traceback
+import csv
 from datetime import datetime
 from bleak import BleakClient, BleakScanner
 
@@ -342,6 +343,61 @@ class CL837SleepMonitor:
             print(f"  Awake: {awake * 5} minutes ({awake} intervals)")
             print(f"  Activity indices: {indices}")
             print()
+            
+            # Store analysis in record for CSV export
+            record['deep_sleep_min'] = deep_sleep * 5
+            record['light_sleep_min'] = light_sleep * 5
+            record['awake_min'] = awake * 5
+
+    def export_to_csv(self, filename=None):
+        """Export sleep data to CSV file"""
+        if not self.sleep_data:
+            print("No data to export")
+            return False
+        
+        if filename is None:
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"sleep_data_{timestamp}.csv"
+        
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = [
+                    'record_number',
+                    'utc_timestamp',
+                    'datetime_utc',
+                    'duration_minutes',
+                    'interval_count',
+                    'deep_sleep_min',
+                    'light_sleep_min',
+                    'awake_min',
+                    'activity_indices'
+                ]
+                
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for i, record in enumerate(self.sleep_data, 1):
+                    writer.writerow({
+                        'record_number': i,
+                        'utc_timestamp': record['utc'],
+                        'datetime_utc': record['datetime'].strftime('%Y-%m-%d %H:%M:%S'),
+                        'duration_minutes': record['count'] * 5,
+                        'interval_count': record['count'],
+                        'deep_sleep_min': record.get('deep_sleep_min', 0),
+                        'light_sleep_min': record.get('light_sleep_min', 0),
+                        'awake_min': record.get('awake_min', 0),
+                        'activity_indices': str(record['activity_indices'])
+                    })
+            
+            print(f"\n✓ Data exported to: {filename}")
+            print(f"  Total records: {len(self.sleep_data)}")
+            return True
+            
+        except Exception as e:
+            print(f"✗ Error exporting to CSV: {e}")
+            traceback.print_exc()
+            return False
 
     async def start_monitoring(self):
         """Start sleep data monitoring"""
@@ -365,6 +421,9 @@ class CL837SleepMonitor:
         
         # Analyze results
         self.analyze_sleep_data()
+        
+        # Export to CSV
+        self.export_to_csv()
 
     async def disconnect(self):
         """Disconnect from device"""
