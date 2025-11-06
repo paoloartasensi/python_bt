@@ -318,25 +318,42 @@ class CL837SleepMonitor:
             print(f"  Start time: {record['datetime']} UTC")
             print(f"  Duration: {record['count'] * 5} minutes ({record['count']} x 5min intervals)")
             
-            # Analyze sleep stages
+            # Analyze sleep stages - CORRECT ALGORITHM from Android SDK
             deep_sleep = 0
             light_sleep = 0
             awake = 0
             
             indices = record['activity_indices']
+            consecutive_zeros = 0
             
-            # Detect deep sleep (3 consecutive zeros)
-            i_idx = 0
-            while i_idx < len(indices):
-                if i_idx + 2 < len(indices) and indices[i_idx] == 0 and indices[i_idx+1] == 0 and indices[i_idx+2] == 0:
-                    deep_sleep += 3
-                    i_idx += 3
-                elif indices[i_idx] < 20:
-                    light_sleep += 1
-                    i_idx += 1
+            for idx, action in enumerate(indices):
+                if action == 0:
+                    # Count consecutive zeros
+                    consecutive_zeros += 1
                 else:
-                    awake += 1
-                    i_idx += 1
+                    # Process accumulated zeros
+                    if consecutive_zeros >= 3:
+                        # 3+ consecutive zeros = deep sleep
+                        deep_sleep += consecutive_zeros
+                    elif consecutive_zeros > 0:
+                        # Less than 3 zeros = light sleep
+                        light_sleep += consecutive_zeros
+                    
+                    consecutive_zeros = 0  # Reset counter
+                    
+                    # Process current non-zero value
+                    if action > 20:
+                        # Awake
+                        awake += 1
+                    else:  # 1-20
+                        # Light sleep
+                        light_sleep += 1
+            
+            # Process remaining zeros at the end
+            if consecutive_zeros >= 3:
+                deep_sleep += consecutive_zeros
+            elif consecutive_zeros > 0:
+                light_sleep += consecutive_zeros
             
             print(f"  Deep sleep: {deep_sleep * 5} minutes ({deep_sleep} intervals)")
             print(f"  Light sleep: {light_sleep * 5} minutes ({light_sleep} intervals)")
