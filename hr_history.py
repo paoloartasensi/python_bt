@@ -253,10 +253,15 @@ class CL837HRMonitor:
             traceback.print_exc()
 
     def checksum(self, data):
-        """Calculate checksum (XOR of all bytes)"""
+        """Calculate checksum used by Chileaf protocol.
+
+        The official SDKs compute a simple byte-wise sum (mod 256) as checksum
+        rather than XOR. Replace XOR with sum to match device expectations.
+        """
         checksum = 0
         for byte in data:
-            checksum ^= byte
+            # ensure byte treated as int
+            checksum = (checksum + (byte & 0xFF)) & 0xFF
         return checksum
 
     async def send_command(self, cmd, params=None):
