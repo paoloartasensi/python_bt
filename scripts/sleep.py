@@ -7,7 +7,7 @@ import time
 import struct
 import traceback
 import csv
-from datetime import datetime
+from datetime import datetime, timezone
 from bleak import BleakClient, BleakScanner
 
 
@@ -301,6 +301,66 @@ class CL837SleepMonitor:
             print(f"Sleep data parsing error: {e}")
             traceback.print_exc()
 
+    def is_valid_timestamp(self, utc_timestamp):
+        """
+        Validate if a UTC timestamp is reasonable
+        
+        Returns: (is_valid, reason)
+        """
+        current_time = int(time.time())
+        
+        # Device release date: assume CL837 released around 2020
+        # 2020-01-01 00:00:00 UTC = 1577836800
+        MIN_VALID_TIMESTAMP = 1577836800
+        
+        # Maximum: current time (can't be in the future)
+        MAX_VALID_TIMESTAMP = current_time
+        
+        # Check if before 2020
+        if utc_timestamp < MIN_VALID_TIMESTAMP:
+            year = datetime.fromtimestamp(utc_timestamp, tz=timezone.utc).year
+            return False, f"too old ({year})"
+        
+        # Check if in the future
+        if utc_timestamp > MAX_VALID_TIMESTAMP:
+            future_date = datetime.fromtimestamp(utc_timestamp, tz=timezone.utc)
+            return False, f"future date ({future_date.strftime('%Y-%m-%d')})"
+        
+        return True, "valid"
+
+    def filter_valid_records(self):
+        """Filter sleep data to keep only valid records"""
+        if not self.sleep_data:
+            return
+        
+        valid_records = []
+        invalid_records = []
+        
+        for record in self.sleep_data:
+            # Check timestamp validity
+            is_valid, reason = self.is_valid_timestamp(record['utc'])
+            
+            # Also filter out empty records (duration = 0)
+            has_data = record['count'] > 0
+            
+            if is_valid and has_data:
+                valid_records.append(record)
+            else:
+                invalid_records.append({
+                    'record': record,
+                    'reason': reason if not has_data else f"{reason}, empty"
+                })
+        
+        if invalid_records:
+            print(f"\n⚠️  Filtered out {len(invalid_records)} invalid records:")
+            for item in invalid_records:
+                rec = item['record']
+                dt = datetime.fromtimestamp(rec['utc'], tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                print(f"   - {dt} UTC (timestamp={rec['utc']}) - Reason: {item['reason']}")
+        
+        self.sleep_data = valid_records
+        print(f"\n✅ {len(valid_records)} valid records retained")
+
     def analyze_sleep_data(self):
         """Analyze and display sleep data"""
         print("\n" + "="*70)
@@ -311,7 +371,14 @@ class CL837SleepMonitor:
             print("No sleep data available")
             return
         
-        print(f"\nTotal sleep records: {len(self.sleep_data)}\n")
+        # Filter invalid records first
+        self.filter_valid_records()
+        
+        if not self.sleep_data:
+            print("\nNo valid sleep data after filtering")
+            return
+        
+        print(f"\nAnalyzing {len(self.sleep_data)} valid records:\n")
         
         for i, record in enumerate(self.sleep_data, 1):
             print(f"Record {i}:")
