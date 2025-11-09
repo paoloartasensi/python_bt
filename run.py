@@ -1,6 +1,12 @@
 """
+<<<<<<< HEAD
 CL837 Unified Accelerometer Monitor
 Connection, reading and real-time oscilloscope visualization
+=======
+CL837 Unified Accelerometer Monitor - RAW DATA VERSION
+Connection, reading and real-time oscilloscope visualization
+NO FILTERING - Direct sensor data
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
 """
 
 import asyncio
@@ -8,7 +14,10 @@ import struct
 import time
 import threading
 from collections import deque
+<<<<<<< HEAD
 import numpy as np
+=======
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
 
 import matplotlib
 matplotlib.use('TkAgg')  # Use TkAgg backend which works better with threading
@@ -17,6 +26,7 @@ import matplotlib.animation as animation
 
 from bleak import BleakClient, BleakScanner
 
+<<<<<<< HEAD
 class KalmanFilter1D:
     """Simple 1D Kalman Filter for accelerometer data"""
     def __init__(self, process_variance=0.001, measurement_variance=0.1, estimate_error=1.0):
@@ -66,6 +76,10 @@ class KalmanFilter1D:
 
 class CL837UnifiedMonitor:
     """Unified CL837 monitor with integrated oscilloscope"""
+=======
+class CL837UnifiedMonitor:
+    """Unified CL837 monitor with integrated oscilloscope - RAW DATA"""
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
     
     def __init__(self):
         # BLE Connection
@@ -81,13 +95,18 @@ class CL837UnifiedMonitor:
         self.CHILEAF_CMD_ACCELEROMETER = 0x0C
         self.CHILEAF_CONVERSION_FACTOR = 4096.0
         
+<<<<<<< HEAD
         # Oscilloscope Data
+=======
+        # Oscilloscope Data - RAW (no filtering)
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
         self.max_samples = 300   # Reduced window for lower latency (~12 sec at 25Hz)
         self.x_data = deque(maxlen=self.max_samples)
         self.y_data = deque(maxlen=self.max_samples)
         self.z_data = deque(maxlen=self.max_samples)
         self.magnitude_data = deque(maxlen=self.max_samples)
         
+<<<<<<< HEAD
         # Kalman filters for each axis (more effective than moving average)
         # Tuning parameters:
         # - process_variance (Q): lower = smoother, higher = more responsive
@@ -96,6 +115,8 @@ class CL837UnifiedMonitor:
         self.kalman_y = KalmanFilter1D(process_variance=0.001, measurement_variance=0.05)
         self.kalman_z = KalmanFilter1D(process_variance=0.001, measurement_variance=0.05)
         
+=======
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
         # Statistics
         self.sample_count = 0
         self.spike_count = 0
@@ -277,13 +298,21 @@ class CL837UnifiedMonitor:
         
         # Create figure with subplots
         self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
+<<<<<<< HEAD
         self.fig.suptitle("CL837 Accelerometer - Kalman Filtered @ 60fps", fontsize=16)
+=======
+        self.fig.suptitle("CL837 Accelerometer - RAW DATA @ 60fps", fontsize=16)
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
         
         # Configure axes
         ax_xyz, ax_mag, ax_xy, ax_stats = self.axes.flatten()
         
         # XYZ plot - FIXED Y LIMITS for smooth scrolling, X scrolls
+<<<<<<< HEAD
         ax_xyz.set_title("XYZ Acceleration (g)")
+=======
+        ax_xyz.set_title("XYZ Acceleration (g) - RAW")
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
         ax_xyz.set_xlabel("Samples")
         ax_xyz.set_ylabel("Acceleration (g)")
         ax_xyz.grid(True, alpha=0.3)
@@ -291,7 +320,11 @@ class CL837UnifiedMonitor:
         ax_xyz.set_ylim(-2, 2)   # Fixed Y range
         
         # Magnitude plot - FIXED Y LIMITS
+<<<<<<< HEAD
         ax_mag.set_title("Total Magnitude")
+=======
+        ax_mag.set_title("Total Magnitude - RAW")
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
         ax_mag.set_xlabel("Samples")
         ax_mag.set_ylabel("Magnitude (g)")
         ax_mag.grid(True, alpha=0.3)
@@ -411,7 +444,11 @@ class CL837UnifiedMonitor:
         if frame % 30 == 0:
             self.update_statistics_display()
         
+<<<<<<< HEAD
         return self.lines
+=======
+        return self.lines + [self.stats_text]
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
 
     def update_statistics_display(self):
         """Update the statistics display"""
@@ -422,7 +459,11 @@ class CL837UnifiedMonitor:
         
         current_vals = self.last_values
         
+<<<<<<< HEAD
         stats_text = f"""LIVE STATISTICS
+=======
+        stats_text = f"""LIVE STATISTICS (RAW DATA)
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Samples: {self.sample_count:,}
 Frames: {self.frame_count:,}
@@ -434,7 +475,11 @@ FREQUENCY
 BLE Frames: {self.instant_frame_freq:.1f} Hz
 Samples: {self.instant_sample_freq:.1f} Hz
 
+<<<<<<< HEAD
 CURRENT VALUES
+=======
+CURRENT VALUES (RAW)
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 X: {current_vals['x']:+.3f}g
 Y: {current_vals['y']:+.3f}g  
@@ -501,7 +546,11 @@ DEVICE
         return samples_processed > 0
 
     def parse_single_sample(self, accel_data, original_frame, sample_index=1, total_samples=1, frame_time=None):
+<<<<<<< HEAD
         """Parse single accelerometer sample"""
+=======
+        """Parse single accelerometer sample - RAW DATA (no filtering)"""
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
         if len(accel_data) < 6:
             return False
         
@@ -509,6 +558,7 @@ DEVICE
             # Accelerometer parsing (6 bytes = 3 axes x 2 bytes int16 little-endian)
             rawAX, rawAY, rawAZ = struct.unpack('<hhh', accel_data)
             
+<<<<<<< HEAD
             # Convert to g-force
             ax_g = rawAX / self.CHILEAF_CONVERSION_FACTOR
             ay_g = rawAY / self.CHILEAF_CONVERSION_FACTOR
@@ -521,6 +571,15 @@ DEVICE
             magnitude = (ax_g_filtered**2 + ay_g_filtered**2 + az_g_filtered**2)**0.5
             
             # SPIKE DETECTION FILTER (using raw values)
+=======
+            # Convert to g-force - RAW, NO FILTERING
+            ax_g = rawAX / self.CHILEAF_CONVERSION_FACTOR
+            ay_g = rawAY / self.CHILEAF_CONVERSION_FACTOR
+            az_g = rawAZ / self.CHILEAF_CONVERSION_FACTOR
+            magnitude = (ax_g**2 + ay_g**2 + az_g**2)**0.5
+            
+            # SPIKE DETECTION FILTER
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
             is_spike = self.detect_spike(ax_g, ay_g, az_g, magnitude, original_frame)
             
             if is_spike and total_samples == 1:  # Only for single samples
@@ -532,6 +591,7 @@ DEVICE
                 print(f"   G values: X={ax_g:+.3f} Y={ay_g:+.3f} Z={az_g:+.3f} Mag={magnitude:.3f}")
                 print("   ---")
             
+<<<<<<< HEAD
             # Add filtered values to oscilloscope buffers
             self.x_data.append(ax_g_filtered)
             self.y_data.append(ay_g_filtered)
@@ -540,6 +600,16 @@ DEVICE
             
             # Update statistics with filtered values
             self.last_values = {'x': ax_g_filtered, 'y': ay_g_filtered, 'z': az_g_filtered, 'mag': magnitude}
+=======
+            # Add RAW values to oscilloscope buffers (no filtering)
+            self.x_data.append(ax_g)
+            self.y_data.append(ay_g)
+            self.z_data.append(az_g)
+            self.magnitude_data.append(magnitude)
+            
+            # Update statistics with RAW values
+            self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
             self.sample_count += 1
             
             # Instantaneous frequency calculation (only for first sample of each frame)
@@ -556,11 +626,19 @@ DEVICE
             
             # Detailed console output for multi-sample
             if total_samples > 1:
+<<<<<<< HEAD
                 print(f"   Sample {sample_index}/{total_samples}: X:{ax_g_filtered:+.3f} Y:{ay_g_filtered:+.3f} Z:{az_g_filtered:+.3f} Mag:{magnitude:.3f}g")
             elif self.sample_count % 15 == 0:  # More frequent output for responsiveness
                 spike_marker = "SPIKE" if is_spike else "DATA"
                 print(f"[{spike_marker}] #{self.sample_count:>4} | "
                       f"X:{ax_g_filtered:+.3f} Y:{ay_g_filtered:+.3f} Z:{az_g_filtered:+.3f} | "
+=======
+                print(f"   Sample {sample_index}/{total_samples}: X:{ax_g:+.3f} Y:{ay_g:+.3f} Z:{az_g:+.3f} Mag:{magnitude:.3f}g")
+            elif self.sample_count % 15 == 0:  # More frequent output for responsiveness
+                spike_marker = "SPIKE" if is_spike else "RAW"
+                print(f"[{spike_marker}] #{self.sample_count:>4} | "
+                      f"X:{ax_g:+.3f} Y:{ay_g:+.3f} Z:{az_g:+.3f} | "
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
                       f"Mag:{magnitude:.3f}g | Frame:{self.instant_frame_freq:.1f}Hz Sample:{self.instant_sample_freq:.1f}Hz")
             
             return True
@@ -603,7 +681,11 @@ DEVICE
 
     async def start_monitoring(self):
         """Start main monitoring"""
+<<<<<<< HEAD
         print("\nStarting CL837 accelerometer monitoring")
+=======
+        print("\nStarting CL837 accelerometer monitoring - RAW DATA MODE")
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
         print("=" * 60)
         
         # Start oscilloscope
@@ -618,7 +700,11 @@ DEVICE
         # Small delay for stabilization
         await asyncio.sleep(0.1)
         
+<<<<<<< HEAD
         print("\nMONITOR ACTIVE:")
+=======
+        print("\nMONITOR ACTIVE (RAW DATA - NO FILTERING):")
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
         print("   - Console: updates every ~1 second")
         print("   - Oscilloscope: real-time at 20fps")
         print("   - Press Ctrl+C to stop")
@@ -675,8 +761,14 @@ async def main():
     """Main function"""
     monitor = CL837UnifiedMonitor()
     
+<<<<<<< HEAD
     print("CL837 UNIFIED ACCELEROMETER MONITOR")
     print("Connection + Console Monitor + Real-Time Oscilloscope")
+=======
+    print("CL837 UNIFIED ACCELEROMETER MONITOR - RAW DATA VERSION")
+    print("Connection + Console Monitor + Real-Time Oscilloscope")
+    print("NO FILTERING - Direct sensor data")
+>>>>>>> d0793c162b211b5a299da0575e42abeb3e329b89
     print("=" * 70)
     
     try:
