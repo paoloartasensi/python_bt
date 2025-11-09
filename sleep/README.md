@@ -326,7 +326,7 @@ All use the same fundamental approach:
 
 ```
 1. Wake up
-2. Run: python sleep/sync_utc.py (3 seconds)
+2. Run: python sleep/sleep.py --sync-only    (3-5 seconds)
 3. Wear device throughout the day
 4. Before bed: Device on charger
 5. Weekly: Download sleep data
@@ -335,8 +335,8 @@ All use the same fundamental approach:
 ### Weekly Analysis
 
 ```powershell
-# Download all sleep data
-python sleep/download_sleep_data.py
+# Download all sleep data with automatic UTC sync
+python sleep/sleep.py
 
 # Result: sleep_data_YYYYMMDD_HHMMSS.csv
 # Open in Excel/Python for analysis
@@ -348,8 +348,22 @@ python sleep/download_sleep_data.py
 ⚠️ CRITICAL: If device battery reached 0%
 
 1. Recharge device
-2. IMMEDIATELY run: python sleep/sync_utc.py
+2. IMMEDIATELY run: python sleep/sleep.py --sync-only
 3. Now safe to use - future timestamps will be correct
+```
+
+### Command Reference
+
+```powershell
+# Quick UTC sync only (3-5 seconds)
+python sleep/sleep.py --sync-only
+python sleep/sleep.py -s
+
+# Full download with automatic UTC sync (15-30 seconds)
+python sleep/sleep.py
+
+# Show help
+python sleep/sleep.py --help
 ```
 
 ## 🐛 Troubleshooting
