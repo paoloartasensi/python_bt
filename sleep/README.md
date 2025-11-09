@@ -219,26 +219,16 @@ record_number,utc_timestamp,datetime_utc,duration_minutes,interval_count,deep_sl
 
 ## 🧠 Sleep Stage Detection Algorithm
 
-Based on official Android SDK implementation:
+Based on official Android SDK implementation.
 
-### Activity Index Interpretation
+### Activity Index Rules
 
-```python
-For each 5-minute interval:
-  
-  IF activity_index == 0:
-      Count consecutive zeros
-      IF 3+ consecutive zeros:
-          → DEEP SLEEP
-      ELSE (< 3 consecutive):
-          → LIGHT SLEEP
-  
-  ELIF 1 ≤ activity_index ≤ 20:
-      → LIGHT SLEEP
-  
-  ELIF activity_index > 20:
-      → AWAKE
-```
+| Activity Index | State | Classification |
+|----------------|-------|----------------|
+| **0** (3+ consecutive) | 😴😴 Deep Sleep | 3+ consecutive zeros = deep sleep |
+| **0** (< 3 consecutive) | 💤 Light Sleep | Less than 3 consecutive zeros |
+| **1-20** | 💤 Light Sleep | Low activity, sleeping |
+| **> 20** | 👁️ Awake | High activity, awake |
 
 ### Example Analysis
 
@@ -250,10 +240,334 @@ Activity indices: [0, 0, 0, 5, 0, 0, 15, 25, 0]
                           Light    Light Awake Light
 ```
 
-Result:
+**Result:**
 - Deep sleep: 15 minutes (3 intervals)
 - Light sleep: 20 minutes (4 intervals)
 - Awake: 5 minutes (1 interval)
+
+---
+
+## 🌙 Night Awakenings Detection
+
+### How the Device Handles Awakenings
+
+The device **does NOT create separate records for night awakenings**. Instead:
+
+✅ **Single continuous record** - One sleep session from bedtime to wake-up
+✅ **Awakenings embedded** - High activity indices (≥20) within the record
+✅ **Automatic detection** - Peaks in activity array indicate wake periods
+
+### Example: Sleep with Awakenings
+
+```python
+Record: 23:00 → 07:00 (8 hours)
+Activity: [5, 3, 2, 0, 0, 0, 15, 25, 30, 22, 10, 5, 0, 0, 0, 2, 1]
+           │  │  │  └──┬──┘  │   │   │   │   │   │  └──┬──┘  │  │
+           │  │  │  Deep     │   └────┬────┘   │   │  Deep   │  │
+           │  │  │  sleep    │   AWAKENING     │   │  sleep  │  │
+           │  │  │           │   (3×5min=15min)│   │         │  │
+           └──┴──┴───────────┴─────────────────┴───┴─────────┴──┘
+              Light sleep        Awake period      Light/Deep
+```
+
+### Timeline Breakdown
+
+| Time | Activity | State | Notes |
+|------|----------|-------|-------|
+| 23:00-23:15 | [5,3,2] | Light sleep | Falling asleep |
+| 23:15-23:30 | [0,0,0] | **Deep sleep** | First deep cycle |
+| 23:30-23:45 | [15] | Light sleep | Transitioning |
+| 23:45-00:15 | [25,30,22] | 👁️ **AWAKENING #1** | Bathroom/movement |
+| 00:15-00:25 | [10,5] | Light sleep | Back to sleep |
+| 00:25-00:40 | [0,0,0] | **Deep sleep** | Second deep cycle |
+| 00:40-00:50 | [2,1] | Light sleep | Light sleep continues |
+
+### Detecting Awakenings (Analysis Guide)
+
+To analyze awakenings in your CSV data:
+
+```python
+# Pseudo-code for awakening detection
+def detect_awakenings(activity_indices, threshold=20):
+    """
+    Detect night awakenings in a sleep record
+    
+    Returns:
+        - Number of awakenings
+        - Duration of each awakening
+        - Total time awake
+        - Sleep efficiency %
+    """
+    awakenings = []
+    in_awakening = False
+    awakening_start = None
+    
+    for i, activity in enumerate(activity_indices):
+        if activity >= threshold:
+            if not in_awakening:
+                # New awakening started
+                awakening_start = i
+                in_awakening = True
+        else:
+            if in_awakening:
+                # Awakening ended
+                duration = (i - awakening_start) * 5  # minutes
+                awakenings.append({
+                    'start_interval': awakening_start,
+                    'end_interval': i,
+                    'duration_min': duration
+                })
+                in_awakening = False
+    
+    total_awake_min = sum(a['duration_min'] for a in awakenings)
+    total_duration = len(activity_indices) * 5
+    sleep_efficiency = ((total_duration - total_awake_min) / total_duration) * 100
+    
+    return {
+        'num_awakenings': len(awakenings),
+        'awakenings': awakenings,
+        'total_awake_min': total_awake_min,
+        'sleep_efficiency': sleep_efficiency
+    }
+```
+
+### Example Output
+
+```
+Record 1: 2025-10-23 23:00:00 UTC
+Duration: 480 minutes (8 hours)
+
+Sleep Stages:
+  🌙 Deep sleep: 180 min (37.5%)
+  💤 Light sleep: 240 min (50.0%)
+  👁️  Awake: 60 min (12.5%)
+
+⚠️  Night Awakenings: 3
+  Awakening 1: 23:45-24:00 (15 min) - peak activity: 30
+  Awakening 2: 02:30-02:40 (10 min) - peak activity: 25
+  Awakening 3: 05:15-05:50 (35 min) - peak activity: 28
+
+💤 Sleep Efficiency: 87.5%
+   (420 min asleep / 480 min total)
+```
+
+### Sleep Efficiency Calculation
+
+```
+Sleep Efficiency = (Total Sleep Time / Total Time in Bed) × 100
+
+Normal ranges:
+  85-100% = Excellent
+  75-84%  = Good
+  65-74%  = Fair
+  <65%    = Poor (consider sleep consultation)
+```
+
+### Key Insights
+
+1. **Multiple awakenings are normal** - Average adult: 1-3 per night
+2. **Short awakenings (<5min)** - Often not consciously remembered
+3. **Long awakenings (>20min)** - May indicate sleep issues
+4. **Pattern matters** - Frequent brief awakenings vs. few long ones
+
+### Data Analysis Tips
+
+**In Excel/Python:**
+```python
+import pandas as pd
+
+df = pd.read_csv('sleep_data_20251109_094710.csv')
+
+# Parse activity indices from string
+df['activity'] = df['activity_indices'].apply(eval)
+
+# Count awakenings per record
+df['num_awakenings'] = df['activity'].apply(
+    lambda x: sum(1 for i in range(len(x)-1) 
+                  if x[i] < 20 and x[i+1] >= 20)
+)
+
+# Calculate sleep efficiency
+df['sleep_efficiency'] = (
+    (df['deep_sleep_min'] + df['light_sleep_min']) / 
+    df['duration_minutes'] * 100
+)
+
+print(df[['datetime_utc', 'num_awakenings', 'sleep_efficiency']])
+```
+
+### Visual Representation
+
+```
+Sleep Timeline (ASCII):
+23:00 |████████▓▓▓▓░░░░▓▓████████| 07:00
+      └─Light──┘Deep│Awake│Deep──┘
+                    └─15min
+
+Legend:
+  █ = Deep sleep (activity = 0,0,0)
+  ▓ = Light sleep (activity 1-20)
+  ░ = Awake (activity > 20)
+```
+
+---
+
+## �️ Sleep Onset Detection (When Sleep Starts)
+
+### How the Device Determines Sleep Start
+
+The CL837 device automatically detects sleep onset using these criteria:
+
+**Hardware Detection:**
+1. **Movement reduction** - Accelerometer detects sustained low activity
+2. **Consistency window** - Activity must stay low for several intervals
+3. **Timestamp recording** - Device records UTC timestamp of first qualifying interval
+
+**Typical Algorithm (Firmware):**
+```python
+# Simplified firmware logic
+def detect_sleep_onset():
+    MIN_CONSECUTIVE_INTERVALS = 3  # 15 minutes sustained
+    ACTIVITY_THRESHOLD = 20
+    
+    for i in intervals:
+        if activity[i:i+3] all < ACTIVITY_THRESHOLD:
+            sleep_start_time = current_timestamp
+            start_recording()
+            break
+```
+
+### Device-Provided Start Time
+
+Each sleep record includes a `utc_timestamp` field:
+- This is the **device-calculated start time**
+- Based on firmware's sleep onset detection
+- Subject to RTC accuracy (requires UTC sync!)
+
+### Validation Rules
+
+**Valid timestamp criteria:**
+```python
+MIN_VALID_TIMESTAMP = 1577836800  # 2020-01-01 (device release)
+MAX_VALID_TIMESTAMP = current_time
+
+is_valid = (
+    timestamp >= MIN_VALID_TIMESTAMP and
+    timestamp <= MAX_VALID_TIMESTAMP and
+    duration > 0
+)
+```
+
+**Invalid timestamps indicate:**
+- ❌ Battery was completely drained (RTC reset)
+- ❌ Device never received initial UTC sync
+- ❌ Factory test data or corrupted memory
+
+### Manual Sleep Onset Calculation
+
+If device timestamp is invalid, you can recalculate sleep start from activity data:
+
+```python
+def calculate_sleep_onset(activity_indices, 
+                         threshold=20, 
+                         min_consecutive=3):
+    """
+    Calculate sleep onset from activity data
+    
+    Args:
+        activity_indices: List of activity values (5-min intervals)
+        threshold: Activity below this = sleep (default 20)
+        min_consecutive: Sustained intervals required (default 3 = 15min)
+    
+    Returns:
+        index: First interval where sleep is sustained
+        None: If no valid sleep onset found
+    """
+    for i in range(len(activity_indices) - min_consecutive + 1):
+        window = activity_indices[i:i + min_consecutive]
+        if all(act < threshold for act in window):
+            return i  # Sleep onset at interval i
+    return None  # No sustained sleep detected
+
+# Example usage
+activity = [25, 30, 22, 15, 10, 5, 3, 0, 0, 0, 2, 1]
+onset_index = calculate_sleep_onset(activity)
+# Returns: 4 (at 10 minutes from record start)
+# Actual sleep start = record_utc + (4 × 5 × 60) seconds
+```
+
+### Sleep Onset Latency
+
+**Definition:** Time from lights-out to sleep onset
+
+```
+Sleep Onset Latency = Sleep Start Time - Bedtime
+
+Normal ranges:
+  < 15 min   = Good
+  15-30 min  = Normal
+  30-60 min  = Borderline
+  > 60 min   = Sleep onset insomnia
+```
+
+**Note:** Device records from first sustained sleep, not from bedtime.
+You need to manually log bedtime to calculate true latency.
+
+### Edge Cases
+
+**Short records (< 30 minutes):**
+```python
+if duration < 30:
+    classification = "NAP"
+else:
+    classification = "NIGHT_SLEEP"
+```
+
+**Multiple sleep sessions:**
+- Device creates separate records for distinct sleep periods
+- Gap between records typically > 60 minutes
+- Naps and night sleep are separate records
+
+**Interrupted recording:**
+- If you remove the device mid-sleep, current record ends
+- New record starts when device detects sleep again
+- Results in fragmented data for one night
+
+### Example: Full Sleep Detection Flow
+
+```
+22:30 - User goes to bed (not detected by device)
+22:45 - Still moving, reading [activity = 28, 25, 30]
+23:00 - Getting sleepy [activity = 15, 12, 10]
+23:15 - SLEEP ONSET DETECTED [activity = 8, 5, 3]
+        ↓
+        Device creates record with UTC = 1762678500 (23:15)
+        
+Activity array starts: [8, 5, 3, 0, 0, 0, ...]
+Record timestamp: 2025-10-23 23:15:00 UTC
+
+Sleep onset latency: 23:15 - 22:30 = 45 minutes
+(but device doesn't know 22:30 - you need to log that manually)
+```
+
+### Practical Tips
+
+1. **Trust device timestamp** if validated (between 2020 and now)
+2. **Manual bedtime log** for accurate onset latency
+3. **Activity threshold** can be adjusted (default 20 works well)
+4. **Min duration filter** removes false positives (micro-naps)
+
+### Configuration Parameters
+
+| Parameter | Default | Purpose | Tuning |
+|-----------|---------|---------|--------|
+| `activity_threshold` | 20 | Sleep/wake boundary | Lower = more sensitive |
+| `min_consecutive` | 3 (15min) | Onset detection window | Higher = less false positives |
+| `min_duration` | 30 min | Nap vs. sleep filter | Adjust based on use case |
+
+---
+
+## �🔬 Advanced Analysis
 
 ## 🔧 Technical Details
 
