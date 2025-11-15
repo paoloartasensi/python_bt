@@ -9,9 +9,9 @@ import struct
 import time
 import threading
 from collections import deque
+import sys
+import os
 
-import matplotlib
-matplotlib.use('TkAgg')  # Use thread-safe backend
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
@@ -58,8 +58,10 @@ class CL837UnifiedMonitor:
         self.axes = None
         self.lines = []
         self.animation = None
-        self.plot_thread = None
+        self.ble_thread = None
+        self.ble_loop = None
         self.plot_ready = False
+        self.monitoring_active = False
 
     async def scan_and_connect(self):
         """Scan and connect to CL837"""
@@ -256,26 +258,13 @@ class CL837UnifiedMonitor:
         plt.tight_layout()
         print("Oscilloscope configured")
 
-    def start_oscilloscope_thread(self):
-        """Start oscilloscope in separate thread"""
-        def run_plot():
-            self.setup_oscilloscope()
-            self.animation = animation.FuncAnimation(
-                self.fig, self.update_plot, interval=25, blit=True)  # 40Hz refresh + blitting for performance
-            self.plot_ready = True
-            plt.show(block=False)  # Non-blocking show for thread safety
-            # Keep the thread alive to maintain the plot
-            while plt.fignum_exists(self.fig.number):
-                plt.pause(0.1)
-        
-        self.plot_thread = threading.Thread(target=run_plot, daemon=True)
-        self.plot_thread.start()
-        
-        # Wait for plot to be ready
-        while not self.plot_ready:
-            time.sleep(0.1)
-        
-        print("Oscilloscope started in separate thread")
+    def start_oscilloscope(self):
+        """Initialize and start oscilloscope (runs in main thread)"""
+        self.setup_oscilloscope()
+        self.animation = animation.FuncAnimation(
+            self.fig, self.update_plot, interval=50, blit=False)  # 20Hz refresh
+        self.plot_ready = True
+        print("Oscilloscope initialized")
 
     def update_plot(self, frame):
         """Update oscilloscope plots"""
@@ -518,9 +507,6 @@ DEVICE
         print("\nStarting CL837 accelerometer monitoring")
         print("=" * 60)
         
-        # Start oscilloscope
-        self.start_oscilloscope_thread()
-        
         # OPTIMIZATION: Enable notifications with maximum priority
         print("Enabling LOW-LATENCY notifications...")
             
@@ -533,17 +519,20 @@ DEVICE
         print("\nMONITOR ACTIVE:")
         print("   - Console: updates every ~1 second")
         print("   - Oscilloscope: real-time at 20fps")
-        print("   - Press Ctrl+C to stop")
+        print("   - Close oscilloscope window to stop")
         print("=" * 60)
+        
+        self.monitoring_active = True
         
         try:
             # LOW-LATENCY: More responsive loop for event handling
-            while True:
-                await asyncio.sleep(0.1)  # 10x more responsive for Ctrl+C and event handling
+            while self.monitoring_active:
+                await asyncio.sleep(0.1)  # 10x more responsive for event handling
         except KeyboardInterrupt:
             print("\nUser interruption...")
         finally:
             print("Disconnecting...")
+            self.monitoring_active = False
             await self.client.stop_notify(self.tx_char)
 
     async def disconnect(self):
@@ -571,20 +560,11 @@ DEVICE
                 print(f"   Average samples per frame: {avg_samples_per_frame:.1f}")
             print("Disconnected")
             
-            # Keep oscilloscope open
-            if self.plot_ready:
-                print("Oscilloscope remains open - close the window to terminate")
-                try:
-                    input("Press Enter to close completely...")
-                except (EOFError, KeyboardInterrupt):
-                    pass
-                finally:
-                    # Clean close of matplotlib
-                    if self.fig is not None:
-                        plt.close(self.fig)
+            # Signal monitoring to stop
+            self.monitoring_active = False
 
-async def main():
-    """Main function"""
+async def async_main():
+    """Async main function - runs in background thread"""
     monitor = CL837UnifiedMonitor()
     
     print("CL837 UNIFIED ACCELEROMETER MONITOR")
@@ -594,31 +574,83 @@ async def main():
     try:
         # Phase 1: Connection
         if not await monitor.scan_and_connect():
-            return
+            return monitor, False
         
         # Phase 2: Service analysis
         if not await monitor.discover_services():
-            return
+            return monitor, False
         
-        # Phase 3: Monitoring
+        # Phase 3: Start monitoring (will run until window closes)
         await monitor.start_monitoring()
+        return monitor, True
         
     except Exception as e:
         print(f"General error: {e}")
         import traceback
         traceback.print_exc()
-    finally:
-        await monitor.disconnect()
+        return monitor, False
 
-if __name__ == "__main__":
+def start_ble_thread(monitor):
+    """Start BLE operations in background thread"""
+    def run_async_loop():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        monitor.ble_loop = loop
+        try:
+            loop.run_until_complete(async_main())
+        except Exception as e:
+            print(f"BLE thread error: {e}")
+        finally:
+            try:
+                loop.run_until_complete(monitor.disconnect())
+            except:
+                pass
+            loop.close()
+    
+    monitor.ble_thread = threading.Thread(target=run_async_loop, daemon=True)
+    monitor.ble_thread.start()
+    
+    # Wait for connection and setup
+    while not monitor.plot_ready and monitor.ble_thread.is_alive():
+        time.sleep(0.1)
+
+def main():
+    """Main function - runs matplotlib in main thread"""
     import warnings
     warnings.filterwarnings("ignore", category=RuntimeWarning)
     
+    monitor = CL837UnifiedMonitor()
+    
     try:
-        asyncio.run(main())
+        # Start BLE in background thread
+        start_ble_thread(monitor)
+        
+        # Wait a bit for BLE to initialize
+        time.sleep(1)
+        
+        if monitor.is_connected:
+            # Initialize oscilloscope in main thread
+            monitor.start_oscilloscope()
+            
+            # Show plot (blocking) - this keeps main thread alive
+            plt.show()
+            
+            # When window closes, signal monitoring to stop
+            monitor.monitoring_active = False
+            print("\nOscilloscope closed. Shutting down...")
+        else:
+            print("Failed to connect. Exiting...")
+        
     except KeyboardInterrupt:
         print("\nProgram terminated")
+        monitor.monitoring_active = False
     finally:
-        # Clean matplotlib/tkinter resources to avoid warnings
-        import matplotlib
-        matplotlib.pyplot.close('all')
+        # Clean matplotlib resources
+        plt.close('all')
+        
+        # Wait for BLE thread to finish
+        if monitor.ble_thread and monitor.ble_thread.is_alive():
+            monitor.ble_thread.join(timeout=2.0)
+
+if __name__ == "__main__":
+    main()
