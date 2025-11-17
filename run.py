@@ -11,6 +11,8 @@ import threading
 from collections import deque
 import sys
 import os
+import csv
+from datetime import datetime
 
 # Force matplotlib to use TkAgg backend for interactive window
 import matplotlib
@@ -55,6 +57,13 @@ class CL837UnifiedMonitor:
         self.frame_freq_window = deque(maxlen=50)  # Window for frame frequency
         self.instant_frame_freq = 0.0  # BLE frame frequency (Hz)
         self.instant_sample_freq = 0.0  # Sample frequency (Hz) = frame_freq * samples_per_frame
+        
+        # CSV Recording (first 5 seconds)
+        self.csv_recording = False
+        self.csv_file = None
+        self.csv_writer = None
+        self.csv_start_time = None
+        self.csv_duration = 5.0  # seconds
         
         # Oscilloscope
         self.fig = None
@@ -302,13 +311,20 @@ class CL837UnifiedMonitor:
         
         # Update axes limits automatically
         if indices:
-            # XYZ plot - Fixed Y axis to ±10g
+            # XYZ plot - Dynamic Y axis
             self.axes[0, 0].set_xlim(max(0, len(indices)-200), len(indices))
-            self.axes[0, 0].set_ylim(-10, 10)
+            all_values = x_list + y_list + z_list
+            if all_values:
+                y_min, y_max = min(all_values), max(all_values)
+                margin = (y_max - y_min) * 0.1 + 0.1
+                self.axes[0, 0].set_ylim(y_min - margin, y_max + margin)
             
-            # Magnitude plot - Fixed to 0-10g
+            # Magnitude plot - Dynamic Y axis
             self.axes[0, 1].set_xlim(max(0, len(indices)-200), len(indices))
-            self.axes[0, 1].set_ylim(0, 10)
+            if mag_list:
+                mag_min, mag_max = min(mag_list), max(mag_list)
+                margin = (mag_max - mag_min) * 0.1 + 0.1
+                self.axes[0, 1].set_ylim(mag_min - margin, mag_max + margin)
         
         # Update statistics
         self.update_statistics_display()
@@ -402,6 +418,35 @@ DEVICE
         
         return samples_processed > 0
 
+    def start_csv_recording(self):
+        """Start CSV recording for first 10 seconds"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"accel_data_{timestamp}.csv"
+        
+        self.csv_file = open(filename, 'w', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow(['Timestamp', 'X (g)', 'Y (g)', 'Z (g)', 'Magnitude (g)'])
+        self.csv_recording = True
+        self.csv_start_time = time.time()
+        print(f"\n📊 CSV recording started: {filename}")
+        print(f"   Recording for {self.csv_duration} seconds...")
+    
+    def stop_csv_recording(self):
+        """Stop CSV recording"""
+        if self.csv_file:
+            self.csv_file.close()
+            self.csv_recording = False
+            print(f"✅ CSV recording completed and saved\n")
+    
+    def record_csv_sample(self, timestamp, x, y, z, mag):
+        """Record a sample to CSV if recording is active"""
+        if self.csv_recording:
+            # Check if 10 seconds have passed
+            if time.time() - self.csv_start_time >= self.csv_duration:
+                self.stop_csv_recording()
+            else:
+                self.csv_writer.writerow([f"{timestamp:.3f}", f"{x:.6f}", f"{y:.6f}", f"{z:.6f}", f"{mag:.6f}"])
+
     def parse_single_sample(self, accel_data, original_frame, sample_index=1, total_samples=1, frame_time=None):
         """Parse single accelerometer sample"""
         if len(accel_data) < 6:
@@ -438,6 +483,14 @@ DEVICE
             # Update statistics
             self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
             self.sample_count += 1
+            
+            # Start CSV recording on first sample
+            if self.sample_count == 1 and not self.csv_recording:
+                self.start_csv_recording()
+            
+            # Record to CSV (with timestamp relative to start)
+            elapsed_time = time.time() - self.start_time
+            self.record_csv_sample(elapsed_time, ax_g, ay_g, az_g, magnitude)
             
             # Instantaneous frequency calculation (only for first sample of each frame)
             if frame_time is not None:
