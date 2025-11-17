@@ -9,6 +9,10 @@ import traceback
 import csv
 from datetime import datetime, timezone
 from bleak import BleakClient, BleakScanner
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+import numpy as np
 
 
 class CL837SleepMonitor:
@@ -506,8 +510,144 @@ class CL837SleepMonitor:
         # Analyze results
         self.analyze_sleep_data()
         
+        # Visualize sleep data
+        self.visualize_sleep_data()
+        
         # Export to CSV
         self.export_to_csv()
+
+    def visualize_sleep_data(self):
+        """Visualize sleep data with matplotlib"""
+        if not self.sleep_data:
+            print("\nNo data to visualize")
+            return
+        
+        print("\n" + "="*70)
+        print("SLEEP DATA VISUALIZATION")
+        print("="*70)
+        
+        # Create figure with subplots
+        num_records = len(self.sleep_data)
+        fig, axes = plt.subplots(num_records, 1, figsize=(14, 4 * num_records))
+        
+        # Handle single record case
+        if num_records == 1:
+            axes = [axes]
+        
+        fig.suptitle(f'CL837 Sleep Data Analysis - {num_records} Record(s)', 
+                     fontsize=16, fontweight='bold')
+        
+        # Color scheme for sleep phases
+        colors = {
+            'awake': '#FF6B6B',      # Red
+            'light': '#4ECDC4',      # Teal
+            'deep': '#45B7D1'        # Deep Blue
+        }
+        
+        for idx, record in enumerate(self.sleep_data):
+            ax = axes[idx]
+            
+            # Prepare data
+            indices = record['activity_indices']
+            start_time = record['datetime']
+            
+            # Classify each 5-minute interval
+            phases = []
+            consecutive_zeros = 0
+            
+            for action in indices:
+                if action == 0:
+                    consecutive_zeros += 1
+                else:
+                    # Check if we had 3+ consecutive zeros (deep sleep)
+                    if consecutive_zeros >= 3:
+                        # Mark previous intervals as deep
+                        for _ in range(consecutive_zeros):
+                            if phases:
+                                phases[-1] = 'deep'
+                            phases.append('deep')
+                        consecutive_zeros = 0
+                    elif consecutive_zeros > 0:
+                        # Less than 3 zeros - treat as light sleep
+                        for _ in range(consecutive_zeros):
+                            phases.append('light')
+                        consecutive_zeros = 0
+                    
+                    # Classify current action
+                    if action > 20:
+                        phases.append('awake')
+                    else:
+                        phases.append('light')
+            
+            # Handle trailing zeros
+            if consecutive_zeros >= 3:
+                for _ in range(consecutive_zeros):
+                    phases.append('deep')
+            elif consecutive_zeros > 0:
+                for _ in range(consecutive_zeros):
+                    phases.append('light')
+            
+            # Ensure phases match indices length
+            while len(phases) < len(indices):
+                phases.append('light')
+            phases = phases[:len(indices)]
+            
+            # Create time axis (in minutes from start)
+            time_minutes = np.arange(0, len(phases) * 5, 5)
+            
+            # Plot bars for each phase
+            for i, phase in enumerate(phases):
+                ax.barh(0, 5, left=time_minutes[i], height=0.8, 
+                       color=colors[phase], edgecolor='white', linewidth=0.5)
+            
+            # Add activity values as text (sparse, every 30 min)
+            for i in range(0, len(indices), 6):  # Every 6 intervals = 30 min
+                if i < len(indices):
+                    ax.text(time_minutes[i] + 2.5, 0, str(indices[i]), 
+                           ha='center', va='center', fontsize=7, 
+                           color='white', fontweight='bold')
+            
+            # Formatting
+            ax.set_xlim(0, len(phases) * 5)
+            ax.set_ylim(-0.5, 0.5)
+            ax.set_xlabel('Time (minutes from start)', fontsize=10)
+            ax.set_yticks([])
+            
+            # Title with sleep summary
+            deep_count = phases.count('deep')
+            light_count = phases.count('light')
+            awake_count = phases.count('awake')
+            
+            title = (f"Record {idx + 1}: {start_time.strftime('%Y-%m-%d %H:%M UTC')} | "
+                    f"Total: {len(phases) * 5} min | "
+                    f"Deep: {deep_count * 5} min | "
+                    f"Light: {light_count * 5} min | "
+                    f"Awake: {awake_count * 5} min")
+            ax.set_title(title, fontsize=10, pad=10)
+            ax.grid(axis='x', alpha=0.3, linestyle='--')
+        
+        # Add legend
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor=colors['deep'], label='Deep Sleep (<20, 3+ consecutive 0s)'),
+            Patch(facecolor=colors['light'], label='Light Sleep (<20)'),
+            Patch(facecolor=colors['awake'], label='Awake (>20)')
+        ]
+        fig.legend(handles=legend_elements, loc='lower center', 
+                  bbox_to_anchor=(0.5, -0.02), ncol=3, fontsize=10)
+        
+        plt.tight_layout()
+        
+        # Save figure
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'sleep_data_{timestamp}.png'
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+        print(f"\n✓ Graph saved to: {filename}")
+        
+        # Show plot
+        print("\n📊 Opening sleep visualization window...")
+        print("   Close the window to continue.")
+        plt.show()
 
     async def disconnect(self):
         """Disconnect from device"""
