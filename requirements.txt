@@ -7,6 +7,8 @@ bleak>=0.21.0              # Cross-platform Bluetooth Low Energy library
 # Data Visualization  
 matplotlib>=3.7.0          # Plotting and real-time oscilloscope visualization
 numpy>=1.24.0              # Numerical computing for data processing
+pandas>=2.0.0              # Data manipulation and analysis
+scipy>=1.10.0              # Scientific computing (signal processing, filtering)
 
 # Note: Standard library modules (no installation required):
 # - asyncio          # Async/await support for BLE operations
