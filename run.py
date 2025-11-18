@@ -46,6 +46,32 @@ class CL837UnifiedMonitor:
         self.z_data = deque(maxlen=self.max_samples)
         self.magnitude_data = deque(maxlen=self.max_samples)
         
+        # VBT Detection - State Machine
+        self.vbt_state = 'IDLE'  # States: IDLE, ECCENTRIC, CONCENTRIC
+        self.ECCENTRIC_THRESHOLD = 0.8   # < 0.8g starts eccentric
+        self.CONCENTRIC_THRESHOLD = 1.3  # > 1.3g starts concentric
+        self.BASELINE_THRESHOLD = 0.1    # ±0.1g around 1.0g = baseline
+        self.MIN_REP_DURATION = 0.5      # seconds
+        self.MAX_REP_DURATION = 4.0      # seconds
+        self.ECCENTRIC_MIN_DURATION = 0.2  # 200ms minimum for eccentric
+        
+        # Current rep tracking
+        self.current_rep_start_time = None
+        self.current_rep_start_idx = None
+        self.eccentric_start_time = None
+        self.eccentric_start_idx = None
+        self.concentric_start_time = None
+        self.concentric_start_idx = None
+        self.eccentric_below_threshold_time = None  # Track sustained drop
+        
+        # VBT Results
+        self.rep_count = 0
+        self.mean_velocity_data = deque(maxlen=50)  # Last 50 reps
+        self.last_mean_velocity = 0.0
+        self.last_peak_velocity = 0.0
+        self.last_rep_duration = 0.0
+        self.timestamps_data = deque(maxlen=self.max_samples)
+        
         # Statistics
         self.sample_count = 0
         self.spike_count = 0
@@ -224,47 +250,55 @@ class CL837UnifiedMonitor:
         """Initialize matplotlib oscilloscope"""
         print("Initializing oscilloscope...")
         
-        # Create figure with subplots
-        self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle("CL837 Accelerometer Oscilloscope - Real Time", fontsize=16)
+        # Create figure with subplots - 2x2 grid
+        self.fig, self.axes = plt.subplots(2, 2, figsize=(14, 10))
+        self.fig.suptitle("CL837 Accelerometer + VBT Monitor - Real Time", fontsize=16, fontweight='bold')
         
         # Configure axes
-        ax_xyz, ax_mag, ax_xy, ax_stats = self.axes.flatten()
+        ax_mag, ax_vbt, ax_y, ax_stats = self.axes.flatten()
         
-        # XYZ plot
-        ax_xyz.set_title("XYZ Acceleration (g)")
-        ax_xyz.set_xlabel("Samples")
-        ax_xyz.set_ylabel("Acceleration (g)")
-        ax_xyz.grid(True, alpha=0.3)
-        ax_xyz.legend(['X', 'Y', 'Z'])
-        
-        # Magnitude plot
-        ax_mag.set_title("Total Magnitude")
+        # Plot 1: Magnitude with VBT thresholds
+        ax_mag.set_title("Magnitude + VBT Thresholds", fontweight='bold')
         ax_mag.set_xlabel("Samples")
         ax_mag.set_ylabel("Magnitude (g)")
         ax_mag.grid(True, alpha=0.3)
+        ax_mag.axhline(y=1.0, color='blue', linestyle='--', linewidth=1.5, alpha=0.5, label='Baseline (1g)')
+        ax_mag.axhline(y=self.ECCENTRIC_THRESHOLD, color='green', linestyle=':', linewidth=1.5, alpha=0.7, label=f'Eccentric <{self.ECCENTRIC_THRESHOLD}g')
+        ax_mag.axhline(y=self.CONCENTRIC_THRESHOLD, color='red', linestyle=':', linewidth=1.5, alpha=0.7, label=f'Concentric >{self.CONCENTRIC_THRESHOLD}g')
+        ax_mag.legend(loc='upper right', fontsize=8)
         
-        # XY plot (top view)
-        ax_xy.set_title("XY View (from top)")
-        ax_xy.set_xlabel("X (g)")
-        ax_xy.set_ylabel("Y (g)")
-        ax_xy.grid(True, alpha=0.3)
-        ax_xy.set_aspect('equal')
-        ax_xy.set_xlim(-2, 2)
-        ax_xy.set_ylim(-2, 2)
+        # Plot 2: VBT Mean Velocity History
+        ax_vbt.set_title("Mean Velocity (VBT)", fontweight='bold', color='darkblue')
+        ax_vbt.set_xlabel("Rep Number")
+        ax_vbt.set_ylabel("Mean Velocity (m/s)")
+        ax_vbt.grid(True, alpha=0.3)
+        ax_vbt.set_ylim(0, 2.0)  # Typical squat velocity range
+        
+        # Plot 3: Y Acceleration (vertical)
+        ax_y.set_title("Y Acceleration (Vertical)", fontweight='bold')
+        ax_y.set_xlabel("Samples")
+        ax_y.set_ylabel("Y (g)")
+        ax_y.grid(True, alpha=0.3)
+        ax_y.axhline(y=1.0, color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Gravity (1g)')
+        ax_y.axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
+        ax_y.legend(loc='upper right', fontsize=8)
         
         # Statistics area
-        ax_stats.set_title("Live Statistics")
+        ax_stats.set_title("Live Statistics + VBT")
         ax_stats.axis('off')
         
         # Initialize lines
-        line_x, = ax_xyz.plot([], [], 'r-', label='X', alpha=0.8)
-        line_y, = ax_xyz.plot([], [], 'g-', label='Y', alpha=0.8)
-        line_z, = ax_xyz.plot([], [], 'b-', label='Z', alpha=0.8)
-        line_mag, = ax_mag.plot([], [], 'purple', linewidth=2)
-        line_xy, = ax_xy.plot([], [], 'o-', markersize=3, alpha=0.6)
+        line_mag, = ax_mag.plot([], [], 'purple', linewidth=2.5, alpha=0.8, label='Magnitude')
+        line_vbt, = ax_vbt.plot([], [], 'o-', color='darkblue', linewidth=2, markersize=8, markerfacecolor='cyan', markeredgecolor='darkblue', markeredgewidth=2)
+        line_y, = ax_y.plot([], [], 'g-', linewidth=2, alpha=0.8, label='Y Accel')
         
-        self.lines = [line_x, line_y, line_z, line_mag, line_xy]
+        self.lines = [line_mag, line_vbt, line_y]
+        
+        # Add state indicator text on magnitude plot
+        self.state_text = ax_mag.text(0.02, 0.98, '', transform=ax_mag.transAxes,
+                                      fontsize=12, verticalalignment='top',
+                                      fontweight='bold',
+                                      bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.8))
         
         # Statistics text
         self.stats_text = ax_stats.text(0.05, 0.95, "", transform=ax_stats.transAxes,
@@ -293,51 +327,49 @@ class CL837UnifiedMonitor:
 
     def update_plot(self, frame):
         """Update oscilloscope plots"""
-        if len(self.x_data) < 2:
+        if len(self.magnitude_data) < 2:
             return self.lines
         
         # Convert deque to lists for matplotlib
-        x_list = list(self.x_data)
-        y_list = list(self.y_data)
-        z_list = list(self.z_data)
         mag_list = list(self.magnitude_data)
+        y_list = list(self.y_data)
         
         # Create indices for x-axis
-        indices = list(range(len(x_list)))
+        indices = list(range(len(mag_list)))
         
-        # Update XYZ lines
-        self.lines[0].set_data(indices, x_list)  # X
-        self.lines[1].set_data(indices, y_list)  # Y
-        self.lines[2].set_data(indices, z_list)  # Z
+        # Update magnitude line (lines[0])
+        self.lines[0].set_data(indices, mag_list)
         
-        # Update magnitude
-        self.lines[3].set_data(indices, mag_list)
+        # Update VBT mean velocity history (lines[1])
+        if len(self.mean_velocity_data) > 0:
+            vbt_indices = list(range(1, len(self.mean_velocity_data) + 1))
+            vbt_values = list(self.mean_velocity_data)
+            self.lines[1].set_data(vbt_indices, vbt_values)
+            
+            # Update VBT plot limits
+            if vbt_indices:
+                self.axes[0, 1].set_xlim(0, max(10, len(vbt_indices) + 1))
+                max_vel = max(vbt_values) if vbt_values else 1.0
+                self.axes[0, 1].set_ylim(0, max(2.0, max_vel * 1.2))
         
-        # Update XY view (last 50 points)
-        if len(x_list) > 50:
-            xy_x = x_list[-50:]
-            xy_y = y_list[-50:]
-        else:
-            xy_x = x_list
-            xy_y = y_list
-        self.lines[4].set_data(xy_x, xy_y)
+        # Update Y acceleration line (lines[2])
+        self.lines[2].set_data(indices, y_list)
         
         # Update axes limits automatically
         if indices:
-            # XYZ plot - Dynamic Y axis
+            # Magnitude plot - Dynamic axes
             self.axes[0, 0].set_xlim(max(0, len(indices)-200), len(indices))
-            all_values = x_list + y_list + z_list
-            if all_values:
-                y_min, y_max = min(all_values), max(all_values)
-                margin = (y_max - y_min) * 0.1 + 0.1
-                self.axes[0, 0].set_ylim(y_min - margin, y_max + margin)
-            
-            # Magnitude plot - Dynamic Y axis
-            self.axes[0, 1].set_xlim(max(0, len(indices)-200), len(indices))
             if mag_list:
                 mag_min, mag_max = min(mag_list), max(mag_list)
                 margin = (mag_max - mag_min) * 0.1 + 0.1
-                self.axes[0, 1].set_ylim(mag_min - margin, mag_max + margin)
+                self.axes[0, 0].set_ylim(mag_min - margin, mag_max + margin)
+            
+            # Y acceleration plot - Dynamic axes
+            self.axes[1, 0].set_xlim(max(0, len(indices)-200), len(indices))
+            if y_list:
+                y_min, y_max = min(y_list), max(y_list)
+                margin = (y_max - y_min) * 0.1 + 0.1
+                self.axes[1, 0].set_ylim(y_min - margin, y_max + margin)
         
         # Update statistics
         self.update_statistics_display()
@@ -356,11 +388,18 @@ class CL837UnifiedMonitor:
         
         current_vals = self.last_values
         
+        # State color coding
+        state_colors = {
+            'IDLE': '⚪ IDLE',
+            'ECCENTRIC': '🟢 ECCENTRIC',
+            'CONCENTRIC': '🔴 CONCENTRIC'
+        }
+        state_display = state_colors.get(self.vbt_state, self.vbt_state)
+        
         stats_text = f"""LIVE STATISTICS
 ========================================
 Samples: {self.sample_count:,}
 Frames: {self.frame_count:,}
-Spikes: {self.spike_count}
 Time: {elapsed_time:.1f}s  
 
 FREQUENCY
@@ -368,20 +407,37 @@ FREQUENCY
 BLE Frames: {self.instant_frame_freq:.1f} Hz
 Samples: {self.instant_sample_freq:.1f} Hz
 
+VBT STATUS
+========================================
+State: {state_display}
+Reps Completed: {self.rep_count}
+Last Mean Vel: {self.last_mean_velocity:.3f} m/s
+Last Peak Vel: {self.last_peak_velocity:.3f} m/s
+Last Duration: {self.last_rep_duration:.2f}s
+
 CURRENT VALUES
 ========================================
-X: {current_vals['x']:+.3f}g
 Y: {current_vals['y']:+.3f}g  
-Z: {current_vals['z']:+.3f}g
 Mag: {current_vals['mag']:.3f}g
 
 DEVICE
 ========================================
 {self.device.name if self.device else 'N/A'}
-{self.device.address if self.device else 'N/A'}
 """
         
         self.stats_text.set_text(stats_text)
+        
+        # Update state indicator on magnitude plot
+        if hasattr(self, 'state_text'):
+            state_bg_colors = {
+                'IDLE': 'lightgray',
+                'ECCENTRIC': 'lightgreen',
+                'CONCENTRIC': 'lightcoral'
+            }
+            self.state_text.set_text(f'  {self.vbt_state}  ')
+            self.state_text.set_bbox(dict(boxstyle='round,pad=0.5', 
+                                         facecolor=state_bg_colors.get(self.vbt_state, 'yellow'), 
+                                         alpha=0.8))
     
     def update_countdown_display(self):
         """Update countdown or recording timer display"""
@@ -446,6 +502,110 @@ DEVICE
         except Exception as e:
             print(f"Parsing error: {e}")
             return False
+
+    def process_vbt_state(self, magnitude, y_accel, current_time):
+        """VBT State Machine - Asymmetric thresholds for squat detection"""
+        
+        # STATE: IDLE - Waiting for eccentric start
+        if self.vbt_state == 'IDLE':
+            # Check for sustained drop below eccentric threshold
+            if magnitude < self.ECCENTRIC_THRESHOLD:
+                if self.eccentric_below_threshold_time is None:
+                    self.eccentric_below_threshold_time = current_time
+                elif (current_time - self.eccentric_below_threshold_time) >= self.ECCENTRIC_MIN_DURATION:
+                    # Eccentric phase confirmed (200ms sustained)
+                    self.vbt_state = 'ECCENTRIC'
+                    self.current_rep_start_time = self.eccentric_below_threshold_time
+                    self.current_rep_start_idx = len(self.magnitude_data) - 1
+                    self.eccentric_start_time = self.eccentric_below_threshold_time
+                    self.eccentric_start_idx = self.current_rep_start_idx
+                    print(f"\n🟢 ECCENTRIC START at t={current_time - self.start_time:.2f}s (Mag={magnitude:.3f}g)")
+            else:
+                # Reset if magnitude goes back above threshold
+                self.eccentric_below_threshold_time = None
+        
+        # STATE: ECCENTRIC - Waiting for concentric explosion
+        elif self.vbt_state == 'ECCENTRIC':
+            if magnitude > self.CONCENTRIC_THRESHOLD:
+                # Concentric phase starts!
+                self.vbt_state = 'CONCENTRIC'
+                self.concentric_start_time = current_time
+                self.concentric_start_idx = len(self.magnitude_data) - 1
+                print(f"🔴 CONCENTRIC START at t={current_time - self.start_time:.2f}s (Mag={magnitude:.3f}g)")
+        
+        # STATE: CONCENTRIC - Calculate velocity and wait for return to baseline
+        elif self.vbt_state == 'CONCENTRIC':
+            # Check for return to baseline (magnitude ≈ 1g ± threshold)
+            if abs(magnitude - 1.0) < self.BASELINE_THRESHOLD:
+                # Rep complete!
+                rep_end_time = current_time
+                rep_end_idx = len(self.magnitude_data) - 1
+                
+                # Validate rep duration
+                rep_duration = rep_end_time - self.current_rep_start_time
+                
+                if self.MIN_REP_DURATION <= rep_duration <= self.MAX_REP_DURATION:
+                    # Valid rep - Calculate VBT metrics
+                    self.calculate_vbt_metrics(rep_end_idx)
+                    
+                    self.rep_count += 1
+                    self.last_rep_duration = rep_duration
+                    
+                    print(f"✅ REP #{self.rep_count} COMPLETE - Duration: {rep_duration:.2f}s | Mean Vel: {self.last_mean_velocity:.3f} m/s | Peak Vel: {self.last_peak_velocity:.3f} m/s\n")
+                else:
+                    print(f"❌ Rep rejected - Duration {rep_duration:.2f}s outside range [{self.MIN_REP_DURATION}-{self.MAX_REP_DURATION}s]\n")
+                
+                # Reset to IDLE
+                self.vbt_state = 'IDLE'
+                self.current_rep_start_time = None
+                self.current_rep_start_idx = None
+                self.eccentric_start_time = None
+                self.eccentric_start_idx = None
+                self.concentric_start_time = None
+                self.concentric_start_idx = None
+                self.eccentric_below_threshold_time = None
+
+    def calculate_vbt_metrics(self, rep_end_idx):
+        """Calculate mean velocity for concentric phase"""
+        if self.concentric_start_idx is None or rep_end_idx <= self.concentric_start_idx:
+            self.last_mean_velocity = 0.0
+            self.last_peak_velocity = 0.0
+            return
+        
+        # Extract concentric phase data
+        y_data_list = list(self.y_data)
+        timestamps_list = list(self.timestamps_data)
+        
+        concentric_y = y_data_list[self.concentric_start_idx:rep_end_idx + 1]
+        concentric_time = timestamps_list[self.concentric_start_idx:rep_end_idx + 1]
+        
+        if len(concentric_y) < 2:
+            self.last_mean_velocity = 0.0
+            self.last_peak_velocity = 0.0
+            return
+        
+        # Subtract gravity to get net acceleration
+        y_accel_net = [y - 1.0 for y in concentric_y]
+        
+        # Integration: v(t) = v(t-1) + a(t) * dt
+        # Start with v=0 at concentric start (bottom of squat)
+        velocity = [0.0]
+        for i in range(1, len(y_accel_net)):
+            dt = concentric_time[i] - concentric_time[i-1]
+            v_new = velocity[-1] + y_accel_net[i] * dt
+            velocity.append(v_new)
+        
+        # Calculate metrics
+        positive_velocity = [v for v in velocity if v > 0]
+        if positive_velocity:
+            self.last_mean_velocity = sum(positive_velocity) / len(positive_velocity)
+            self.last_peak_velocity = max(velocity)
+        else:
+            self.last_mean_velocity = 0.0
+            self.last_peak_velocity = 0.0
+        
+        # Add to history
+        self.mean_velocity_data.append(self.last_mean_velocity)
 
     def parse_multi_sample_frame(self, data):
         """Parse Chileaf frame with possible multiple samples according to 0x0C doc"""
@@ -545,9 +705,16 @@ DEVICE
             self.z_data.append(az_g)
             self.magnitude_data.append(magnitude)
             
+            # Track timestamps for VBT
+            current_time = time.time()
+            self.timestamps_data.append(current_time)
+            
             # Update statistics
             self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
             self.sample_count += 1
+            
+            # VBT STATE MACHINE - Process each sample
+            self.process_vbt_state(magnitude, ay_g, current_time)
             
             # Start countdown on first sample
             if self.sample_count == 1 and not self.countdown_active and not self.csv_recording:
