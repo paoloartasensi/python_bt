@@ -64,6 +64,9 @@ class CL837UnifiedMonitor:
         self.csv_writer = None
         self.csv_start_time = None
         self.csv_duration = 5.0  # seconds
+        self.countdown_active = False
+        self.countdown_start_time = None
+        self.countdown_duration = 3.0  # 3 seconds countdown
         
         # Oscilloscope
         self.fig = None
@@ -74,6 +77,7 @@ class CL837UnifiedMonitor:
         self.ble_loop = None
         self.plot_ready = False
         self.monitoring_active = False
+        self.countdown_text = None  # Text object for countdown display
 
     async def scan_and_connect(self):
         """Scan and connect to CL837"""
@@ -267,6 +271,15 @@ class CL837UnifiedMonitor:
                                        fontsize=10, verticalalignment='top',
                                        fontfamily='monospace')
         
+        # Countdown/Recording timer text (centered on figure)
+        self.countdown_text = self.fig.text(0.5, 0.5, "", 
+                                           ha='center', va='center',
+                                           fontsize=60, fontweight='bold',
+                                           color='red', alpha=0.9,
+                                           bbox=dict(boxstyle='round,pad=0.5', 
+                                                    facecolor='yellow', alpha=0.8))
+        self.countdown_text.set_visible(False)
+        
         plt.tight_layout()
         print("Oscilloscope configured")
 
@@ -329,6 +342,9 @@ class CL837UnifiedMonitor:
         # Update statistics
         self.update_statistics_display()
         
+        # Update countdown/recording timer
+        self.update_countdown_display()
+        
         return self.lines + [self.stats_text]
 
     def update_statistics_display(self):
@@ -366,6 +382,49 @@ DEVICE
 """
         
         self.stats_text.set_text(stats_text)
+    
+    def update_countdown_display(self):
+        """Update countdown or recording timer display"""
+        if not self.countdown_text:
+            return
+        
+        # Check if countdown is active
+        if self.countdown_active and self.countdown_start_time:
+            elapsed = time.time() - self.countdown_start_time
+            remaining = self.countdown_duration - elapsed
+            
+            if remaining > 0:
+                # Show countdown: 3, 2, 1
+                count = int(remaining) + 1
+                self.countdown_text.set_text(str(count))
+                self.countdown_text.set_visible(True)
+                self.countdown_text.set_color('red')
+                # Pulse effect: larger when closer to next number
+                pulse = 60 + 20 * (1 - (remaining % 1))
+                self.countdown_text.set_fontsize(pulse)
+            else:
+                # Countdown finished, start recording
+                self.countdown_active = False
+                if not self.csv_recording:
+                    self.start_csv_recording()
+        
+        # Check if recording is active
+        elif self.csv_recording and self.csv_start_time:
+            elapsed = time.time() - self.csv_start_time
+            remaining = self.csv_duration - elapsed
+            
+            if remaining > 0:
+                # Show recording timer
+                self.countdown_text.set_text(f"REC\n{remaining:.1f}s")
+                self.countdown_text.set_visible(True)
+                self.countdown_text.set_color('red')
+                self.countdown_text.set_fontsize(40)
+            else:
+                # Recording finished
+                self.countdown_text.set_visible(False)
+        else:
+            # Nothing active, hide text
+            self.countdown_text.set_visible(False)
 
     def parse_chileaf_data(self, data):
         """Parse data from Chileaf protocol - ONLY accelerometer frames 0x0C"""
@@ -418,8 +477,14 @@ DEVICE
         
         return samples_processed > 0
 
+    def start_countdown(self):
+        """Start 3-2-1 countdown before recording"""
+        self.countdown_active = True
+        self.countdown_start_time = time.time()
+        print("\n⏱️  Countdown started: 3... 2... 1...")
+    
     def start_csv_recording(self):
-        """Start CSV recording for first 10 seconds"""
+        """Start CSV recording for first 5 seconds"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"accel_data_{timestamp}.csv"
         
@@ -484,13 +549,14 @@ DEVICE
             self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
             self.sample_count += 1
             
-            # Start CSV recording on first sample
-            if self.sample_count == 1 and not self.csv_recording:
-                self.start_csv_recording()
+            # Start countdown on first sample
+            if self.sample_count == 1 and not self.countdown_active and not self.csv_recording:
+                self.start_countdown()
             
-            # Record to CSV (with timestamp relative to start)
-            elapsed_time = time.time() - self.start_time
-            self.record_csv_sample(elapsed_time, ax_g, ay_g, az_g, magnitude)
+            # Record to CSV (with timestamp relative to start) - only if recording is active
+            if self.csv_recording:
+                elapsed_time = time.time() - self.start_time
+                self.record_csv_sample(elapsed_time, ax_g, ay_g, az_g, magnitude)
             
             # Instantaneous frequency calculation (only for first sample of each frame)
             if frame_time is not None:
