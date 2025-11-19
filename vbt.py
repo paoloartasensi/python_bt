@@ -42,45 +42,45 @@ class CL837VBTMonitor:
         self.timestamps_data = deque(maxlen=self.max_samples)
         self.velocity_data = deque(maxlen=self.max_samples)
         
-        # VBT State Machine - BASATO SU MAGNITUDINE (più affidabile)
-        self.BASELINE_ZONE = 0.06  # ±6% dalla baseline = zona REST (più stretta)
-        self.MIN_DEPTH_MAG = 0.60  # Deve scendere sotto 0.60g per validare squat (range VBT completo)
-        self.MIN_PEAK_MAG = 1.05  # Picco concentrico deve superare 1.05g (accelerazione reale)
+        # VBT State Machine - BASED ON MAGNITUDE (more reliable)
+        self.BASELINE_ZONE = 0.06  # ±6% from baseline = REST zone (narrower)
+        self.MIN_DEPTH_MAG = 0.60  # Must drop below 0.60g to validate squat (full VBT range)
+        self.MIN_PEAK_MAG = 1.05  # Concentric peak must exceed 1.05g (real acceleration)
         
-        self.MIN_ECCENTRIC_WINDOW = 0.30  # s - minimo 300ms discesa (controllo)
-        self.MAX_CONCENTRIC_WINDOW = 2.5  # s - massimo 2.5s spinta
-        self.MIN_CONCENTRIC_DURATION = 0.15  # s - minimo 150ms spinta (range VBT esplosivo)
-        self.REFRACTORY_PERIOD = 0.8  # s - pausa tra rep (più lungo)
+        self.MIN_ECCENTRIC_WINDOW = 0.30  # s - minimum 300ms descent (control)
+        self.MAX_CONCENTRIC_WINDOW = 2.5  # s - maximum 2.5s push
+        self.MIN_CONCENTRIC_DURATION = 0.15  # s - minimum 150ms push (explosive VBT range)
+        self.REFRACTORY_PERIOD = 0.8  # s - pause between reps (longer)
         
-        self.MAG_SMOOTH_WINDOW = 5  # Smoothing magnitudine
+        self.MAG_SMOOTH_WINDOW = 5  # Magnitude smoothing
         self.mag_smooth_buffer = deque(maxlen=self.MAG_SMOOTH_WINDOW)
         
-        # Variance/STD analysis per distinguere movimento da rumore
-        self.STD_WINDOW = 20  # Finestra per calcolo STD (~400ms @ 50Hz)
+        # Variance/STD analysis to distinguish movement from noise
+        self.STD_WINDOW = 20  # Window for STD calculation (~400ms @ 50Hz)
         self.mag_std_buffer = deque(maxlen=self.STD_WINDOW)
-        self.MIN_MOVEMENT_STD = 0.015  # Soglia minima STD per movimento reale
-        self.MAX_NOISE_STD = 0.008  # Soglia massima STD per rumore statico
+        self.MIN_MOVEMENT_STD = 0.015  # Minimum STD threshold for real movement
+        self.MAX_NOISE_STD = 0.008  # Maximum STD threshold for static noise
         self.current_std = 0.0
         
-        # Event Window System - Finestra temporale per analisi marker
-        self.WINDOW_DURATION = 2.5  # 2.5 secondi di registrazione dopo break baseline
-        self.PRE_BUFFER_SIZE = 25  # 0.5s @ 50Hz - buffer pre-finestra
+        # Event Window System - Time window for marker analysis
+        self.WINDOW_DURATION = 2.5  # 2.5 seconds recording after baseline break
+        self.PRE_BUFFER_SIZE = 25  # 0.5s @ 50Hz - pre-window buffer
         self.pre_buffer_mag = deque(maxlen=self.PRE_BUFFER_SIZE)
         self.pre_buffer_time = deque(maxlen=self.PRE_BUFFER_SIZE)
         self.pre_buffer_idx = deque(maxlen=self.PRE_BUFFER_SIZE)
         self.window_active = False
         self.window_start_time = None
         self.window_start_idx = None
-        self.window_data_mag = []  # Magnitudini nella finestra
-        self.window_data_time = []  # Timestamp nella finestra
-        self.window_data_idx = []   # Indici nella finestra
+        self.window_data_mag = []  # Magnitudes in window
+        self.window_data_time = []  # Timestamps in window
+        self.window_data_idx = []   # Indices in window
         
-        # Markers trovati nella finestra
+        # Markers found in window
         self.markers = {
-            'counter_movement': None,  # Cuspide rovesciata preparazione
-            'bottom': None,             # Minimo assoluto
-            'peak': None,               # Picco massimo concentrico
-            'deceleration': None        # Minimo dopo picco (caduta)
+            'counter_movement': None,  # Inverted cusp preparation
+            'bottom': None,             # Absolute minimum
+            'peak': None,               # Maximum concentric peak
+            'deceleration': None        # Minimum after peak (drop)
         }
         
         # Refractory period
@@ -480,13 +480,13 @@ LAST REP:
             self.mag_smooth_buffer.append(magnitude)  # Per smoothing state machine
             self.mag_std_buffer.append(magnitude)  # Per calcolo STD
             
-            # Popola pre-buffer continuamente (solo se non in finestra attiva)
+            # Populate pre-buffer continuously (only if window not active)
             if not self.window_active:
                 self.pre_buffer_mag.append(magnitude)
                 self.pre_buffer_time.append(timestamp)
                 self.pre_buffer_idx.append(self.sample_count - 1)
             
-            # Calcola STD corrente (variabilità movimento)
+            # Calculate current STD (movement variability)
             if len(self.mag_std_buffer) >= 10:
                 self.current_std = np.std(list(self.mag_std_buffer))
             else:
@@ -510,7 +510,7 @@ LAST REP:
                 self.current_velocity = self.current_velocity + mag_accel_net * dt
                 self.velocity_data.append(self.current_velocity)
                 
-                # Check event window (sistema a finestra con marker)
+                # Check event window (event window system with markers)
                 self.check_event_window(timestamp, len(self.magnitude_data) - 1, magnitude)
             else:
                 self.velocity_data.append(0.0)
@@ -519,15 +519,15 @@ LAST REP:
             print(f"Unpack error: {e}")
 
     def open_event_window(self, current_time, current_idx):
-        """Apre finestra di 2.5s per analisi movimento (con pre-buffer 0.5s)"""
+        """Opens 2.5s window for movement analysis (with 0.5s pre-buffer)"""
         self.window_active = True
         
-        # Includi pre-buffer nei dati finestra
+        # Include pre-buffer data in window
         self.window_data_mag = list(self.pre_buffer_mag)
         self.window_data_time = list(self.pre_buffer_time)
         self.window_data_idx = list(self.pre_buffer_idx)
         
-        # Il "vero" start time è quello del primo sample nel pre-buffer
+        # The "true" start time is that of the first sample in the pre-buffer
         if len(self.window_data_time) > 0:
             self.window_start_time = self.window_data_time[0]
             self.window_start_idx = self.window_data_idx[0]
@@ -545,25 +545,25 @@ LAST REP:
         pre_buffer_duration = current_time - self.window_start_time if len(self.window_data_time) > 0 else 0
         print(f"\n🔵 EVENT WINDOW OPENED at {current_time:.2f}s (with {pre_buffer_duration:.2f}s pre-buffer)")
         
-        # Beep grave apertura finestra (non bloccante, solo se passati >0.5s dall'ultimo)
+        # Grave beep for window opening (non-blocking, only if >0.5s since last)
         now = time.time()
         if now - self.last_beep_time > 0.5:
             self.last_beep_time = now
             threading.Thread(target=lambda: winsound.Beep(400, 300), daemon=True).start()
     
     def close_and_analyze_window(self, current_time):
-        """Chiude finestra e analizza marker per validare squat"""
+        """Closes window and analyzes markers to validate squat"""
         print(f"\n🔴 EVENT WINDOW CLOSED at {current_time:.2f}s ({len(self.window_data_mag)} samples)")
         
         if len(self.window_data_mag) < 30:  # Minimo 30 samples (~0.6s @ 50Hz)
-            print("⚠️  Finestra troppo corta - ignoro evento")
+            print("⚠️  Window too short - ignore event")
             self.window_active = False
             return
         
         # === FIND MARKERS ===
         baseline = self.baseline_value
         
-        # 1. Counter-movement (GIALLO - apertura finestra, prima cuspide sotto baseline)
+        # 1. Counter-movement (YELLOW - window opening, first cusp below baseline)
         for i in range(min(25, len(self.window_data_mag))):  # Primi 0.5s
             if self.window_data_mag[i] < baseline * 0.92:  # Sotto 92% baseline
                 if self.markers['counter_movement'] is None:
@@ -574,7 +574,7 @@ LAST REP:
                     }
                     break
         
-        # 2. Picco spinta concentrica (BLU - massimo assoluto = accelerazione spinta)
+        # 2. Concentric push peak (BLUE - absolute maximum = push acceleration)
         max_global_idx = np.argmax(self.window_data_mag)
         self.markers['peak'] = {
             'idx': self.window_data_idx[max_global_idx],
@@ -582,7 +582,7 @@ LAST REP:
             'time': self.window_data_time[max_global_idx]
         }
         
-        # 3. Rinculo accelerometro (ROSSO - minimo dopo il picco blu)
+        # 3. Accelerometer recoil (RED - minimum after blue peak)
         post_peak_start = max_global_idx + 1
         if post_peak_start < len(self.window_data_mag):
             post_peak_mag = self.window_data_mag[post_peak_start:]
@@ -594,7 +594,7 @@ LAST REP:
                 'time': self.window_data_time[min_idx]
             }
             
-            # 4. Ritorno baseline (VERDE - risalita verso baseline dopo rinculo)
+            # 4. Return to baseline (GREEN - rise towards baseline after recoil)
             post_recoil_start = min_idx + 1
             if post_recoil_start < len(self.window_data_mag) - 5:
                 post_recoil_mag = self.window_data_mag[post_recoil_start:]
@@ -606,7 +606,7 @@ LAST REP:
                     'time': self.window_data_time[green_idx]
                 }
         else:
-            # Fallback se non c'è abbastanza dati dopo il picco
+            # Fallback if not enough data after peak
             min_idx = np.argmin(self.window_data_mag)
             self.markers['bottom'] = {
                 'idx': self.window_data_idx[min_idx],
@@ -634,11 +634,11 @@ LAST REP:
         self.window_active = False
     
     def save_window_screenshot(self, is_valid):
-        """Salva screenshot finestra con marker"""
+        """Saves window screenshot with markers"""
         try:
             import os
             
-            # Crea folder windowshots se non esiste
+            # Create windowshots folder if it doesn't exist
             screenshot_dir = "windowshots"
             if not os.path.exists(screenshot_dir):
                 os.makedirs(screenshot_dir)
@@ -671,33 +671,33 @@ LAST REP:
             print(f"⚠️  Screenshot error: {e}")
     
     def validate_squat_from_markers(self):
-        """Valida che i marker formino un pattern squat valido"""
-        peak = self.markers['peak']  # BLU - picco spinta concentrica
-        recoil = self.markers['bottom']  # ROSSO - rinculo accelerometro
+        """Validates that markers form a valid squat pattern"""
+        peak = self.markers['peak']  # BLUE - concentric push peak
+        recoil = self.markers['bottom']  # RED - accelerometer recoil
         
         if not peak:
-            print("⚠️  Picco mancante")
+            print("⚠️  Peak missing")
             return False
         
-        # 1. Picco spinta deve essere sufficientemente alto
+        # 1. Push peak must be sufficiently high
         if peak['mag'] <= self.MIN_PEAK_MAG:
-            print(f"⚠️  Picco troppo basso: {peak['mag']:.3f}g <= {self.MIN_PEAK_MAG}g")
+            print(f"⚠️  Peak too low: {peak['mag']:.3f}g <= {self.MIN_PEAK_MAG}g")
             return False
         
-        # 2. Deve esserci rinculo dopo il picco
+        # 2. There must be recoil after the peak
         if not recoil:
-            print(f"⚠️  Rinculo mancante")
+            print(f"⚠️  Recoil missing")
             return False
         
-        # 3. Rinculo deve essere DOPO il picco (ordine temporale corretto)
+        # 3. Recoil must be AFTER the peak (correct temporal order)
         if recoil['time'] <= peak['time']:
-            print(f"⚠️  Ordine errato: rinculo prima del picco")
+            print(f"⚠️  Wrong order: recoil before peak")
             return False
         
-        # 4. Calcola durata fase concentrica (inizio finestra -> picco)
+        # 4. Calculate concentric phase duration (window start -> peak)
         time_to_peak = peak['time'] - self.window_start_time
         
-        # VALIDAZIONE DURATION: range VBT completo (da esplosivo a controllato)
+        # DURATION VALIDATION: full VBT range (from explosive to controlled)
         if time_to_peak < self.MIN_CONCENTRIC_DURATION:
             print(f"⚠️  Movimento troppo rapido: {time_to_peak:.2f}s < {self.MIN_CONCENTRIC_DURATION}s")
             return False
