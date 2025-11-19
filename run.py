@@ -426,19 +426,6 @@ class CL837UnifiedMonitor:
                 margin = vel_range * 0.2 + 0.1
                 self.ax_velocity.set_ylim(-vel_range - margin, vel_range + margin)
         
-        # Update temporal windows bar plot
-        self.update_temporal_windows_plot()
-        
-        # Draw baseline zones after calibration (one-time)
-        if self.baseline_calculated and not hasattr(self, 'baseline_zones_drawn'):
-            baseline_upper = self.baseline_value * (1 + self.BASELINE_ZONE)
-            baseline_lower = self.baseline_value * (1 - self.BASELINE_ZONE)
-            self.axes[0, 0].axhline(y=baseline_upper, color='red', linestyle=':', linewidth=1.5, alpha=0.5, label=f'Upper Zone (+{self.BASELINE_ZONE*100:.0f}%)')
-            self.axes[0, 0].axhline(y=baseline_lower, color='green', linestyle=':', linewidth=1.5, alpha=0.5, label=f'Lower Zone (-{self.BASELINE_ZONE*100:.0f}%)')
-            self.axes[0, 0].fill_between([0, self.max_samples], baseline_lower, baseline_upper, color='yellow', alpha=0.1, label='Stable Zone')
-            self.axes[0, 0].legend(loc='upper right', fontsize=8)
-            self.baseline_zones_drawn = True
-        
         # Update axes limits automatically
         if indices:
             # Magnitude plot - Dynamic axes
@@ -447,9 +434,9 @@ class CL837UnifiedMonitor:
                 mag_min, mag_max = min(mag_list), max(mag_list)
                 margin = (mag_max - mag_min) * 0.1 + 0.1
                 self.axes[0, 0].set_ylim(mag_min - margin, mag_max + margin)
-            
-            # Temporal window plot - Update bars
-            self.update_temporal_windows_plot()
+        
+        # Update temporal windows bar plot
+        self.update_temporal_windows_plot()
         
         # Update statistics
         self.update_statistics_display()
