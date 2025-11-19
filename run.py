@@ -45,6 +45,7 @@ class CL837UnifiedMonitor:
         self.y_data = deque(maxlen=self.max_samples)
         self.z_data = deque(maxlen=self.max_samples)
         self.magnitude_data = deque(maxlen=self.max_samples)
+        self.velocity_data = deque(maxlen=self.max_samples)  # Integrated velocity for real-time plot
         
         # VBT Detection - Pattern Matching (buffered analysis)
         self.BASELINE_ZONE = 0.08  # ±8% around baseline = stable
@@ -83,6 +84,9 @@ class CL837UnifiedMonitor:
         self.last_eccentric_duration = 0.0
         self.last_concentric_duration = 0.0
         self.timestamps_data = deque(maxlen=self.max_samples)
+        
+        # Real-time velocity integration
+        self.current_velocity = 0.0  # Current integrated velocity (m/s)
         
         # Velocity Loss tracking
         self.first_rep_mean_velocity = None
@@ -276,14 +280,22 @@ class CL837UnifiedMonitor:
         # Configure axes
         ax_mag, ax_vbt, ax_y, ax_stats = self.axes.flatten()
         
-        # Plot 1: Magnitude with Pattern Matching zones
-        ax_mag.set_title("Magnitude + Pattern Matching Zones", fontweight='bold')
+        # Plot 1: Magnitude with Pattern Matching zones + Velocity
+        ax_mag.set_title("Magnitude + Velocity (Real-Time Integration)", fontweight='bold')
         ax_mag.set_xlabel("Samples")
-        ax_mag.set_ylabel("Magnitude (g)")
+        ax_mag.set_ylabel("Magnitude (g)", color='purple', fontweight='bold')
+        ax_mag.tick_params(axis='y', labelcolor='purple')
         ax_mag.grid(True, alpha=0.3)
         ax_mag.axhline(y=1.0, color='blue', linestyle='--', linewidth=1.5, alpha=0.5, label='Baseline (1g)')
+        
+        # Create second Y-axis for velocity
+        self.ax_velocity = ax_mag.twinx()
+        self.ax_velocity.set_ylabel('Velocity (m/s)', color='navy', fontweight='bold')
+        self.ax_velocity.tick_params(axis='y', labelcolor='navy')
+        self.ax_velocity.axhline(y=0, color='navy', linestyle=':', linewidth=1, alpha=0.3)
+        
         # Baseline zones will be drawn dynamically after calibration
-        ax_mag.legend(loc='upper right', fontsize=8)
+        ax_mag.legend(loc='upper left', fontsize=8)
         
         # Plot 2: VBT Mean Velocity History
         ax_vbt.set_title("Mean Velocity (VBT)", fontweight='bold', color='darkblue')
@@ -309,8 +321,9 @@ class CL837UnifiedMonitor:
         line_mag, = ax_mag.plot([], [], 'purple', linewidth=2.5, alpha=0.8, label='Magnitude')
         line_vbt, = ax_vbt.plot([], [], 'o-', color='darkblue', linewidth=2, markersize=8, markerfacecolor='cyan', markeredgecolor='darkblue', markeredgewidth=2)
         line_y, = ax_y.plot([], [], 'g-', linewidth=2, alpha=0.8, label='Y Accel')
+        line_velocity, = self.ax_velocity.plot([], [], 'navy', linewidth=2, linestyle='--', alpha=0.8, label='Velocity')
         
-        self.lines = [line_mag, line_vbt, line_y]
+        self.lines = [line_mag, line_vbt, line_y, line_velocity]
         
         # Add state indicator text on magnitude plot
         self.state_text = ax_mag.text(0.02, 0.98, '', transform=ax_mag.transAxes,
@@ -385,6 +398,18 @@ class CL837UnifiedMonitor:
         
         # Update Y acceleration line (lines[2])
         self.lines[2].set_data(indices, y_list)
+        
+        # Update velocity line (lines[3]) on second Y-axis
+        if len(self.velocity_data) > 0:
+            vel_list = list(self.velocity_data)
+            self.lines[3].set_data(indices, vel_list)
+            
+            # Update velocity axis limits
+            if vel_list:
+                vel_min, vel_max = min(vel_list), max(vel_list)
+                vel_range = max(abs(vel_min), abs(vel_max))
+                margin = vel_range * 0.2 + 0.1
+                self.ax_velocity.set_ylim(-vel_range - margin, vel_range + margin)
         
         # Draw baseline zones after calibration (one-time)
         if self.baseline_calculated and not hasattr(self, 'baseline_zones_drawn'):
@@ -713,7 +738,7 @@ DEVICE
             return
         
         # Extract concentric phase data (bottom to peak)
-        mag_data_list = list(self.magnitude_data)
+        mag_data_list = list(self.magnitude_data)  # Use magnitude (orientation-independent)
         timestamps_list = list(self.timestamps_data)
         
         concentric_mag = mag_data_list[bottom_idx:concentric_peak_idx + 1]
@@ -725,13 +750,13 @@ DEVICE
         
         # Use the calibrated baseline value (not fixed 1.0)
         baseline_value = self.baseline_value
-        mag_accel_net = [mag - baseline_value for mag in concentric_mag]
+        mag_accel_net = [(mag - baseline_value) * 9.81 for mag in concentric_mag]  # Convert to m/s²
         
         # DEBUG: Print concentric data for analysis
         print(f"\n🔍 DEBUG VBT Calculation:")
         print(f"   Baseline used: {baseline_value:.3f}g")
         print(f"   Concentric mag range: {min(concentric_mag):.3f}g to {max(concentric_mag):.3f}g")
-        print(f"   Net accel range: {min(mag_accel_net):.3f}g to {max(mag_accel_net):.3f}g")
+        print(f"   Net accel range: {min(mag_accel_net):.3f} to {max(mag_accel_net):.3f} m/s²")
         print(f"   Samples in concentric: {len(concentric_mag)}")
         
         # Integration: velocity and displacement
@@ -913,6 +938,26 @@ DEVICE
             # Track timestamps for VBT
             current_time = time.time()
             self.timestamps_data.append(current_time)
+            
+            # Real-time velocity integration from magnitude
+            if self.baseline_calculated and len(self.timestamps_data) >= 2:
+                # Calculate dt from last timestamp
+                dt = self.timestamps_data[-1] - self.timestamps_data[-2]
+                # Net acceleration from magnitude (remove baseline gravity)
+                mag_accel_net = (magnitude - self.baseline_value) * 9.81  # m/s²
+                # Integrate: v = v0 + a*dt
+                self.current_velocity = self.current_velocity + mag_accel_net * dt
+                self.velocity_data.append(self.current_velocity)
+                
+                # Reset velocity when back to stable position (near zero velocity for extended period)
+                if abs(self.current_velocity) < 0.05 and len(self.velocity_data) >= 10:
+                    # Check if velocity has been near zero for last 10 samples
+                    recent_vel = list(self.velocity_data)[-10:]
+                    if all(abs(v) < 0.1 for v in recent_vel):
+                        self.current_velocity = 0.0  # Reset to prevent drift
+            else:
+                # Not calibrated yet or first sample
+                self.velocity_data.append(0.0)
             
             # Update statistics
             self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
