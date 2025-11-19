@@ -10,6 +10,7 @@ import struct
 import traceback
 import threading
 from collections import deque
+import winsound  # Per beep audio su Windows
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
@@ -209,7 +210,7 @@ class CL837VBTMonitor:
         self.ax_scope.set_title("Real-Time Magnitude", fontweight='bold', fontsize=12)
         self.ax_scope.set_xlabel("Samples (last 150)", fontsize=10)
         self.ax_scope.set_ylabel("Magnitude (g)", fontsize=10)
-        self.ax_scope.set_ylim(0.5, 1.5)
+        self.ax_scope.set_ylim(0, 4.0)  # SCALA FISSA 0-4g
         self.ax_scope.grid(True, alpha=0.3)
         self.ax_scope.axhline(y=1.0, color='blue', linestyle='--', linewidth=1.5, alpha=0.5, label='Baseline (1g)')
         self.ax_scope.legend(loc='upper right', fontsize=8)
@@ -304,6 +305,7 @@ class CL837VBTMonitor:
         self.ax_scope.set_title("Real-Time Magnitude + State Machine", fontweight='bold', fontsize=12)
         self.ax_scope.set_xlabel("Samples (last 150)", fontsize=10)
         self.ax_scope.set_ylabel("Magnitude (g)", fontsize=10)
+        self.ax_scope.set_ylim(0, 4.0)  # SCALA FISSA 0-4g
         self.ax_scope.grid(True, alpha=0.3)
         
         if len(self.magnitude_data) > 0:
@@ -330,13 +332,6 @@ class CL837VBTMonitor:
                     self.ax_scope.scatter([bottom_relative], [mag_list[bottom_relative]], 
                                          s=200, marker='o', color='red', edgecolors='black', 
                                          linewidths=2, zorder=10, label='Bottom')
-            
-            # Auto-scale Y-axis
-            if mag_list:
-                y_min = min(mag_list)
-                y_max = max(mag_list)
-                y_margin = (y_max - y_min) * 0.1 if y_max > y_min else 0.1
-                self.ax_scope.set_ylim(max(0.5, y_min - y_margin), min(1.5, y_max + y_margin))
             
             # Update X-axis
             if indices:
@@ -541,15 +536,30 @@ LAST REP:
         elif self.vbt_state == 'CONCENTRIC':
             concentric_duration = current_time - self.concentric_start_time
             
-            # Fine CONCENTRIC quando ritorna in zona baseline
-            if baseline_lower <= mag_smooth <= baseline_upper:
-                if concentric_duration >= self.MIN_CONCENTRIC_DURATION:
-                    print(f"✅ CONCENTRIC END (mag={mag_smooth:.3f}g ritorna baseline)")
-                    self.finalize_rep(current_time, current_idx)
-                    self.vbt_state = 'REST'
+            # Fine CONCENTRIC quando:
+            # 1. Ritorna in zona baseline (non solo tocca, ma stabilizza)
+            # 2. Magnitudine è risalita sopra il bottom di almeno 0.15g
+            mag_list = list(self.magnitude_data)
+            if len(mag_list) >= 5:
+                # Verifica stabilità in baseline (ultimi 5 samples)
+                recent_mags = mag_list[-5:]
+                all_in_baseline = all(baseline_lower <= m <= baseline_upper for m in recent_mags)
+                
+                # Verifica risalita significativa dal bottom
+                if self.bottom_idx is not None and len(mag_list) > self.bottom_idx:
+                    bottom_mag = mag_list[self.bottom_idx]
+                    rise_amount = mag_smooth - bottom_mag
+                else:
+                    rise_amount = 0.0
+                
+                if all_in_baseline and rise_amount >= 0.15:
+                    if concentric_duration >= self.MIN_CONCENTRIC_DURATION:
+                        print(f"✅ CONCENTRIC END (mag={mag_smooth:.3f}g, rise={rise_amount:.3f}g)")
+                        self.finalize_rep(current_time, current_idx)
+                        self.vbt_state = 'REST'
             
             # Timeout
-            elif concentric_duration > self.MAX_CONCENTRIC_WINDOW:
+            if concentric_duration > self.MAX_CONCENTRIC_WINDOW:
                 print(f"⚠️  CONCENTRIC TIMEOUT ({concentric_duration:.1f}s) - Resetting to REST")
                 self.vbt_state = 'REST'
                 self.current_velocity = 0.0
@@ -611,6 +621,13 @@ LAST REP:
         if len(self.rep_velocities) >= 2:
             vl = ((self.rep_velocities[0] - self.rep_velocities[-1]) / self.rep_velocities[0]) * 100
             print(f"   Velocity Loss: {vl:.1f}%")
+        
+        # BEEP ACUSTICO! 🔊
+        try:
+            # Frequency 2000Hz (acuto), duration 150ms
+            winsound.Beep(2000, 150)
+        except:
+            pass  # Ignora errori se audio non disponibile
 
     def notification_handler(self, sender, data):
         """BLE notification handler"""
