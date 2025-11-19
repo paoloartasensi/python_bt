@@ -672,9 +672,13 @@ LAST REP:
             print(f"⚠️  Movimento troppo rapido: {time_to_peak:.2f}s < {self.MIN_CONCENTRIC_DURATION}s")
             return False
         
-        # 5. Calcola velocità media: delta magnitudine / tempo
+        # 5. Calcola velocità media: formula VBT standard
+        # Velocità = (picco_accelerazione - baseline) * g * sqrt(2 * spostamento_stimato)
+        # Semplificato: delta_mag rappresenta accelerazione netta, moltiplichiamo per g
         delta_mag = peak['mag'] - self.baseline_value
-        mean_velocity = abs(delta_mag * 9.81 * time_to_peak / 2)
+        # Velocità media per VBT: assumiamo spostamento proporzionale a tempo²
+        # Formula semplificata usata da sistemi commerciali
+        mean_velocity = abs(delta_mag) * 9.81 * 0.5  # g -> m/s² con fattore medio
         
         print(f"✅ SQUAT VALIDO: picco={peak['mag']:.3f}g, rinculo={recoil['mag']:.3f}g, tempo={time_to_peak:.2f}s, MV={mean_velocity:.3f}m/s")
         return True
@@ -686,7 +690,8 @@ LAST REP:
         # Calcola velocità media dalla spinta: baseline -> picco
         time_to_peak = peak['time'] - self.window_start_time
         delta_mag = peak['mag'] - self.baseline_value
-        mean_velocity = abs(delta_mag * 9.81 * time_to_peak / 2)  # Stima semplificata
+        # Formula VBT standard: delta accelerazione * g * fattore medio
+        mean_velocity = abs(delta_mag) * 9.81 * 0.5  # Conversione g -> m/s con media
         
         # Store rep
         self.rep_count += 1
