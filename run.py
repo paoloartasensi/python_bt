@@ -47,26 +47,35 @@ class CL837UnifiedMonitor:
         self.magnitude_data = deque(maxlen=self.max_samples)
         self.velocity_data = deque(maxlen=self.max_samples)  # Integrated velocity for real-time plot
         
-        # VBT Detection - Pattern Matching (buffered analysis)
-        self.BASELINE_ZONE = 0.08  # ±8% around baseline = stable
-        self.MIN_REP_DURATION = 0.8  # Increased from 0.5 - squat takes time
-        self.MAX_REP_DURATION = 4.0
-        self.REFRACTORY_PERIOD = 1.0  # Increased from 0.8 - more time between reps
-        self.ANALYSIS_BUFFER_SIZE = 100  # samples to analyze (2-4 sec @ 25-50Hz)
-        self.ANALYSIS_INTERVAL = 0.2  # seconds between pattern analysis runs
-        self.MIN_DEPTH_THRESHOLD = 0.90  # Minimum depth: must go below 0.90g (relaxed for explosive movements)
-        self.MIN_CONCENTRIC_SAMPLES = 5  # Minimum samples in concentric phase (reduced for explosive)
-        self.MIN_ECCENTRIC_SAMPLES = 5  # Minimum samples in eccentric phase (reduced for explosive)
-        self.MIN_ECCENTRIC_RANGE = 0.05  # Minimum magnitude decrease during eccentric (g) - reduced for quick dips
-        self.MIN_CONCENTRIC_ACCEL = 0.10  # Minimum peak acceleration during concentric (g above baseline) - reduced
+        # VBT Detection - Real-time State Machine (production-ready like Vitruve, Enode, Beast)
+        # Velocity thresholds (m/s)
+        self.VEL_ECCENTRIC_THRESHOLD = -0.12  # Must be < this for eccentric detection (200-250ms window)
+        self.VEL_CONCENTRIC_THRESHOLD = 0.08   # Must drop < this to close rep
+        self.VEL_ZERO_CROSSING_TOLERANCE = 0.03  # Window around zero for bottom detection
         
-        # Pattern matching state
-        self.signal_states = deque(maxlen=self.ANALYSIS_BUFFER_SIZE)  # Track ABOVE/BELOW/BASE states
-        self.last_pattern_analysis_time = 0
+        # Temporal windows (seconds) - like commercial devices
+        self.MIN_ECCENTRIC_WINDOW = 0.20   # 200ms minimum eccentric phase (like Vitruve)
+        self.MAX_CONCENTRIC_WINDOW = 1.5   # 1.5s maximum concentric phase
+        self.MIN_CONCENTRIC_DURATION = 0.15  # 150ms minimum concentric
+        self.REFRACTORY_PERIOD = 0.5       # 500ms between reps
+        
+        # Smoothing for velocity state detection
+        self.VEL_SMOOTH_WINDOW = 5  # samples for moving average (50-100ms @ 50Hz)
+        
+        # Real-time State Machine (like commercial VBT devices)
+        self.vbt_state = 'REST'  # States: REST, ECCENTRIC, CONCENTRIC
+        self.eccentric_start_time = None
+        self.eccentric_start_idx = None
+        self.bottom_time = None
+        self.bottom_idx = None
+        self.concentric_start_time = None
+        self.concentric_start_idx = None
         self.last_rep_end_time = -self.REFRACTORY_PERIOD
         self.baseline_value = 1.0  # Will be calculated from first samples
         self.baseline_calculated = False
-        self.pending_reps = []  # Reps detected but not yet finalized
+        
+        # Velocity smoothing buffer for state detection
+        self.velocity_smooth_buffer = deque(maxlen=self.VEL_SMOOTH_WINDOW)
         
         # VBT Results - Extended metrics
         self.rep_count = 0
@@ -454,12 +463,12 @@ class CL837UnifiedMonitor:
         
         current_vals = self.last_values
         
-        # Pattern matching status
+        # VBT State Machine status
         if self.baseline_calculated:
-            pattern_status = f"🟢 ACTIVE (Buffer: {len(self.magnitude_data)} samples)"
+            state_emoji = {'REST': '⚪', 'ECCENTRIC': '🔵', 'CONCENTRIC': '🟢'}
+            state_display = f"{state_emoji.get(self.vbt_state, '⚪')} {self.vbt_state}"
         else:
-            pattern_status = "⚪ CALIBRATING..."
-        state_display = pattern_status
+            state_display = "⚪ CALIBRATING..."
         
         stats_text = f"""LIVE STATISTICS
 ========================================
@@ -586,149 +595,105 @@ DEVICE
             print(f"Parsing error: {e}")
             return False
 
-    def analyze_pattern_buffer(self, current_time):
-        """Analyze buffered signal for pattern matching - runs periodically"""
-        if len(self.magnitude_data) < 20:  # Need minimum samples
-            return
-        
-        # Calculate baseline from first stable samples if not done
-        if not self.baseline_calculated and len(self.magnitude_data) >= 30:
-            mag_list = list(self.magnitude_data)
-            self.baseline_value = sum(mag_list[:30]) / 30
-            self.baseline_calculated = True
-            print(f"\n📊 Baseline calculated: {self.baseline_value:.3f}g")
-        
+    def check_vbt_state_transition(self, current_time, current_idx):
+        """Real-time state machine for VBT detection (like Vitruve, Enode, Beast)"""
         if not self.baseline_calculated:
             return
         
-        baseline_upper = self.baseline_value * (1 + self.BASELINE_ZONE)
-        baseline_lower = self.baseline_value * (1 - self.BASELINE_ZONE)
+        # Get smoothed velocity for state detection
+        if len(self.velocity_smooth_buffer) < self.VEL_SMOOTH_WINDOW:
+            return  # Not enough samples for smooth velocity
         
-        # Classify recent samples into states
-        mag_list = list(self.magnitude_data)
-        time_list = list(self.timestamps_data)
+        velocity_smooth = sum(self.velocity_smooth_buffer) / len(self.velocity_smooth_buffer)
         
-        # Look for state transitions in buffer
-        state_changes = []
-        prev_state = 'BASE'
+        # STATE MACHINE
+        if self.vbt_state == 'REST':
+            # Look for eccentric start: velocity < -0.12 m/s
+            if velocity_smooth < self.VEL_ECCENTRIC_THRESHOLD:
+                # Check refractory period
+                if current_time - self.last_rep_end_time >= self.REFRACTORY_PERIOD:
+                    # Start eccentric phase
+                    self.vbt_state = 'ECCENTRIC'
+                    self.eccentric_start_time = current_time
+                    self.eccentric_start_idx = current_idx
+                    print(f"\n🔵 ECCENTRIC START (vel={velocity_smooth:.3f} m/s)")
         
-        for i in range(max(0, len(mag_list) - self.ANALYSIS_BUFFER_SIZE), len(mag_list)):
-            mag = mag_list[i]
+        elif self.vbt_state == 'ECCENTRIC':
+            eccentric_duration = current_time - self.eccentric_start_time
             
-            if mag > baseline_upper:
-                current_state = 'ABOVE'
-            elif mag < baseline_lower:
-                current_state = 'BELOW'
-            else:
-                current_state = 'BASE'
+            # Look for zero-crossing (bottom): velocity goes from negative to positive
+            if velocity_smooth >= -self.VEL_ZERO_CROSSING_TOLERANCE:
+                # Check minimum eccentric window (200ms like Vitruve)
+                if eccentric_duration >= self.MIN_ECCENTRIC_WINDOW:
+                    # Bottom detected!
+                    self.vbt_state = 'CONCENTRIC'
+                    self.bottom_time = current_time
+                    self.bottom_idx = current_idx
+                    self.concentric_start_time = current_time
+                    self.concentric_start_idx = current_idx
+                    print(f"⚫ BOTTOM (vel={velocity_smooth:.3f} m/s, ecc_duration={eccentric_duration:.3f}s)")
+                else:
+                    # False start - eccentric too short
+                    self.vbt_state = 'REST'
+                    print(f"❌ FALSE START - eccentric too short ({eccentric_duration:.3f}s < {self.MIN_ECCENTRIC_WINDOW}s)")
             
-            if current_state != prev_state:
-                state_changes.append({
-                    'idx': i,
-                    'time': time_list[i],
-                    'from': prev_state,
-                    'to': current_state,
-                    'mag': mag
-                })
-                prev_state = current_state
+            # Timeout check - eccentric too long (invalid movement)
+            elif eccentric_duration > 3.0:
+                self.vbt_state = 'REST'
+                print(f"❌ ECCENTRIC TIMEOUT - too slow")
         
-        # Pattern matching: BASE → movement → BASE
-        for i in range(len(state_changes) - 1):
-            if state_changes[i]['from'] == 'BASE':
-                rep_start_idx = state_changes[i]['idx']
-                rep_start_time = state_changes[i]['time']
-                
-                # Apply refractory period
-                if rep_start_time - self.last_rep_end_time < self.REFRACTORY_PERIOD:
-                    continue
-                
-                # Look for return to BASE
-                for j in range(i + 1, len(state_changes)):
-                    if state_changes[j]['to'] == 'BASE':
-                        rep_end_idx = state_changes[j]['idx']
-                        rep_end_time = state_changes[j]['time']
-                        rep_duration = rep_end_time - rep_start_time
-                        
-                        # Validate duration
-                        if self.MIN_REP_DURATION <= rep_duration <= self.MAX_REP_DURATION:
-                            # Find bottom and concentric peak
-                            rep_segment = mag_list[rep_start_idx:rep_end_idx + 1]
-                            
-                            if len(rep_segment) < 20:  # Need minimum samples
-                                continue
-                            
-                            bottom_relative = rep_segment.index(min(rep_segment))
-                            bottom_idx = rep_start_idx + bottom_relative
-                            bottom_mag = rep_segment[bottom_relative]
-                            
-                            # VALIDATION 1: Check depth - must go below threshold
-                            if bottom_mag >= self.MIN_DEPTH_THRESHOLD:
-                                continue  # Not deep enough for a squat
-                            
-                            # VALIDATION 2: Check eccentric phase has minimum samples
-                            if bottom_relative < self.MIN_ECCENTRIC_SAMPLES:
-                                continue  # Too fast descent = not a controlled squat
-                            
-                            # VALIDATION 3: Check eccentric pattern - magnitude must decrease progressively
-                            eccentric_segment = rep_segment[:bottom_relative + 1]
-                            eccentric_start_mag = eccentric_segment[0]
-                            eccentric_range = eccentric_start_mag - bottom_mag
-                            
-                            if eccentric_range < self.MIN_ECCENTRIC_RANGE:
-                                continue  # Not enough movement = just standing or small oscillation
-                            
-                            # Check for progressive descent (at least 60% of samples should show downward trend)
-                            decreasing_count = sum(1 for i in range(1, len(eccentric_segment)) 
-                                                  if eccentric_segment[i] <= eccentric_segment[i-1])
-                            descent_ratio = decreasing_count / len(eccentric_segment) if len(eccentric_segment) > 1 else 0
-                            
-                            if descent_ratio < 0.3:  # At least 30% progressive descent (relaxed for explosive)
-                                continue  # Not a controlled descent pattern
-                            
-                            # Concentric peak after bottom
-                            if bottom_relative < len(rep_segment) - 1:
-                                concentric_segment = rep_segment[bottom_relative:]
-                                concentric_peak_relative = concentric_segment.index(max(concentric_segment))
-                                concentric_peak_idx = bottom_idx + concentric_peak_relative
-                                
-                                # VALIDATION 4: Check concentric phase has minimum samples
-                                if concentric_peak_relative < self.MIN_CONCENTRIC_SAMPLES:
-                                    continue  # Too fast ascent = not a proper squat
-                                
-                                # VALIDATION 5: Concentric peak should be higher than bottom
-                                peak_mag = concentric_segment[concentric_peak_relative]
-                                if peak_mag <= bottom_mag + 0.05:  # At least 0.05g difference
-                                    continue  # No clear concentric phase
-                                
-                                # VALIDATION 6: Check concentric has sufficient acceleration above baseline
-                                # This ensures real upward movement, not just recovery to standing
-                                max_concentric_accel = max(concentric_segment) - self.baseline_value
-                                if max_concentric_accel < self.MIN_CONCENTRIC_ACCEL:
-                                    continue  # Not enough upward acceleration = no real concentric effort
-                            else:
-                                concentric_peak_idx = rep_end_idx
-                            
-                            # Calculate VBT metrics
-                            self.calculate_vbt_metrics_from_indices(
-                                bottom_idx, concentric_peak_idx, rep_end_idx,
-                                time_list[bottom_idx], time_list[concentric_peak_idx],
-                                rep_start_time, rep_end_time
-                            )
-                            
-                            self.rep_count += 1
-                            self.last_rep_duration = rep_duration
-                            self.last_rep_end_time = rep_end_time
-                            
-                            print(f"\n✅ REP #{self.rep_count} DETECTED (buffered)")
-                            print(f"   Depth: {bottom_mag:.3f}g | Range: {eccentric_range:.3f}g | Descent: {descent_ratio*100:.0f}%")
-                            print(f"   Concentric Accel: {max_concentric_accel:.3f}g | Peak Mag: {peak_mag:.3f}g")
-                            print(f"   Samples: Ecc={bottom_relative} Conc={concentric_peak_relative - bottom_relative}")
-                            print(f"   Duration: TUT={rep_duration:.2f}s | Ecc={self.last_eccentric_duration:.2f}s | Conc={self.last_concentric_duration:.2f}s")
-                            print(f"   Velocity: Mean={self.last_mean_velocity:.3f} m/s | Peak={self.last_peak_velocity:.3f} m/s | MPV={self.last_mean_propulsive_velocity:.3f} m/s")
-                            print(f"   Power: Mean={self.last_mean_power:.1f}W | Peak={self.last_peak_power:.1f}W | MPP={self.last_mean_propulsive_power:.1f}W")
-                            print(f"   ROM: {self.last_concentric_displacement:.3f}m | VL: {self.velocity_loss_percent:.1f}%\n")
-                            
-                            break  # Process one rep at a time
+        elif self.vbt_state == 'CONCENTRIC':
+            concentric_duration = current_time - self.concentric_start_time
+            
+            # Look for rep end: velocity drops below threshold
+            if velocity_smooth < self.VEL_CONCENTRIC_THRESHOLD:
+                # Check minimum concentric duration
+                if concentric_duration >= self.MIN_CONCENTRIC_DURATION:
+                    # REP COMPLETED! Calculate metrics immediately
+                    self.finalize_rep(current_time, current_idx)
+                    self.vbt_state = 'REST'
+                else:
+                    # Too fast - invalid rep
+                    self.vbt_state = 'REST'
+                    print(f"❌ CONCENTRIC TOO SHORT ({concentric_duration:.3f}s)")
+            
+            # Timeout check - concentric window exceeded (1.5s like Vitruve)
+            elif concentric_duration > self.MAX_CONCENTRIC_WINDOW:
+                # Invalid rep - concentric too long
+                self.vbt_state = 'REST'
+                print(f"❌ CONCENTRIC TIMEOUT ({concentric_duration:.3f}s > {self.MAX_CONCENTRIC_WINDOW}s)")
+    
+    def finalize_rep(self, end_time, end_idx):
+        """Finalize rep and calculate all VBT metrics immediately (80-250ms response like commercial devices)"""
+        # Find concentric peak (max velocity during concentric phase)
+        concentric_velocities = list(self.velocity_data)[self.concentric_start_idx:end_idx+1]
+        if not concentric_velocities:
+            return
+        
+        peak_vel_relative = concentric_velocities.index(max(concentric_velocities))
+        concentric_peak_idx = self.concentric_start_idx + peak_vel_relative
+        
+        # Calculate all VBT metrics
+        self.calculate_vbt_metrics_from_indices(
+            self.bottom_idx,
+            concentric_peak_idx,
+            end_idx,
+            self.bottom_time,
+            list(self.timestamps_data)[concentric_peak_idx],
+            self.eccentric_start_time,
+            end_time
+        )
+        
+        self.rep_count += 1
+        self.last_rep_end_time = end_time
+        
+        # Instant feedback (like commercial devices)
+        print(f"\n✅ REP #{self.rep_count} COMPLETED (INSTANT)")
+        print(f"   ⚡ Response time: ~{(time.time() - end_time)*1000:.0f}ms")
+        print(f"   Duration: TUT={self.last_rep_duration:.2f}s | Ecc={self.last_eccentric_duration:.2f}s | Conc={self.last_concentric_duration:.2f}s")
+        print(f"   Velocity: Mean={self.last_mean_velocity:.3f} m/s | Peak={self.last_peak_velocity:.3f} m/s | MPV={self.last_mean_propulsive_velocity:.3f} m/s")
+        print(f"   Power: Mean={self.last_mean_power:.1f}W | Peak={self.last_peak_power:.1f}W | MPP={self.last_mean_propulsive_power:.1f}W")
+        print(f"   ROM: {self.last_concentric_displacement:.3f}m | VL: {self.velocity_loss_percent:.1f}%\n")
 
     def calculate_vbt_metrics_from_indices(self, bottom_idx, concentric_peak_idx, rep_end_idx,
                                            bottom_time, concentric_peak_time, rep_start_time, rep_end_time):
@@ -963,10 +928,12 @@ DEVICE
             self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
             self.sample_count += 1
             
-            # PATTERN ANALYSIS - Run periodically (not every sample for efficiency)
-            if current_time - self.last_pattern_analysis_time >= self.ANALYSIS_INTERVAL:
-                self.analyze_pattern_buffer(current_time)
-                self.last_pattern_analysis_time = current_time
+            # Add to velocity smoothing buffer
+            self.velocity_smooth_buffer.append(self.current_velocity)
+            
+            # REAL-TIME STATE MACHINE - Check EVERY sample (like commercial devices)
+            if self.baseline_calculated:
+                self.check_vbt_state_transition(current_time, len(self.velocity_data) - 1)
             
             # Start countdown on first sample
             if self.sample_count == 1 and not self.countdown_active and not self.csv_recording:
