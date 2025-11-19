@@ -46,31 +46,50 @@ class CL837UnifiedMonitor:
         self.z_data = deque(maxlen=self.max_samples)
         self.magnitude_data = deque(maxlen=self.max_samples)
         
-        # VBT Detection - State Machine
-        self.vbt_state = 'IDLE'  # States: IDLE, ECCENTRIC, CONCENTRIC
-        self.ECCENTRIC_THRESHOLD = 0.8   # < 0.8g starts eccentric
-        self.CONCENTRIC_THRESHOLD = 1.3  # > 1.3g starts concentric
-        self.BASELINE_THRESHOLD = 0.1    # ±0.1g around 1.0g = baseline
-        self.MIN_REP_DURATION = 0.5      # seconds
-        self.MAX_REP_DURATION = 4.0      # seconds
-        self.ECCENTRIC_MIN_DURATION = 0.2  # 200ms minimum for eccentric
+        # VBT Detection - Pattern Matching (buffered analysis)
+        self.BASELINE_ZONE = 0.08  # ±8% around baseline = stable
+        self.MIN_REP_DURATION = 0.8  # Increased from 0.5 - squat takes time
+        self.MAX_REP_DURATION = 4.0
+        self.REFRACTORY_PERIOD = 1.0  # Increased from 0.8 - more time between reps
+        self.ANALYSIS_BUFFER_SIZE = 100  # samples to analyze (2-4 sec @ 25-50Hz)
+        self.ANALYSIS_INTERVAL = 0.2  # seconds between pattern analysis runs
+        self.MIN_DEPTH_THRESHOLD = 0.90  # Minimum depth: must go below 0.90g (relaxed for explosive movements)
+        self.MIN_CONCENTRIC_SAMPLES = 5  # Minimum samples in concentric phase (reduced for explosive)
+        self.MIN_ECCENTRIC_SAMPLES = 5  # Minimum samples in eccentric phase (reduced for explosive)
+        self.MIN_ECCENTRIC_RANGE = 0.05  # Minimum magnitude decrease during eccentric (g) - reduced for quick dips
+        self.MIN_CONCENTRIC_ACCEL = 0.10  # Minimum peak acceleration during concentric (g above baseline) - reduced
         
-        # Current rep tracking
-        self.current_rep_start_time = None
-        self.current_rep_start_idx = None
-        self.eccentric_start_time = None
-        self.eccentric_start_idx = None
-        self.concentric_start_time = None
-        self.concentric_start_idx = None
-        self.eccentric_below_threshold_time = None  # Track sustained drop
+        # Pattern matching state
+        self.signal_states = deque(maxlen=self.ANALYSIS_BUFFER_SIZE)  # Track ABOVE/BELOW/BASE states
+        self.last_pattern_analysis_time = 0
+        self.last_rep_end_time = -self.REFRACTORY_PERIOD
+        self.baseline_value = 1.0  # Will be calculated from first samples
+        self.baseline_calculated = False
+        self.pending_reps = []  # Reps detected but not yet finalized
         
-        # VBT Results
+        # VBT Results - Extended metrics
         self.rep_count = 0
         self.mean_velocity_data = deque(maxlen=50)  # Last 50 reps
+        self.mpv_data = deque(maxlen=50)  # MPV for each rep
         self.last_mean_velocity = 0.0
         self.last_peak_velocity = 0.0
+        self.last_mean_propulsive_velocity = 0.0
+        self.last_time_to_peak_velocity = 0.0
+        self.last_concentric_displacement = 0.0
+        self.last_mean_power = 0.0
+        self.last_peak_power = 0.0
+        self.last_mean_propulsive_power = 0.0
         self.last_rep_duration = 0.0
+        self.last_eccentric_duration = 0.0
+        self.last_concentric_duration = 0.0
         self.timestamps_data = deque(maxlen=self.max_samples)
+        
+        # Velocity Loss tracking
+        self.first_rep_mean_velocity = None
+        self.velocity_loss_percent = 0.0
+        
+        # Mass for power calculation (kg) - default 1kg, should be set to athlete + bar weight
+        self.MASS = 1.0
         
         # Statistics
         self.sample_count = 0
@@ -84,12 +103,12 @@ class CL837UnifiedMonitor:
         self.instant_frame_freq = 0.0  # BLE frame frequency (Hz)
         self.instant_sample_freq = 0.0  # Sample frequency (Hz) = frame_freq * samples_per_frame
         
-        # CSV Recording (first 5 seconds)
+        # CSV Recording (first 20 seconds)
         self.csv_recording = False
         self.csv_file = None
         self.csv_writer = None
         self.csv_start_time = None
-        self.csv_duration = 5.0  # seconds
+        self.csv_duration = 20.0  # seconds
         self.countdown_active = False
         self.countdown_start_time = None
         self.countdown_duration = 3.0  # 3 seconds countdown
@@ -257,14 +276,13 @@ class CL837UnifiedMonitor:
         # Configure axes
         ax_mag, ax_vbt, ax_y, ax_stats = self.axes.flatten()
         
-        # Plot 1: Magnitude with VBT thresholds
-        ax_mag.set_title("Magnitude + VBT Thresholds", fontweight='bold')
+        # Plot 1: Magnitude with Pattern Matching zones
+        ax_mag.set_title("Magnitude + Pattern Matching Zones", fontweight='bold')
         ax_mag.set_xlabel("Samples")
         ax_mag.set_ylabel("Magnitude (g)")
         ax_mag.grid(True, alpha=0.3)
         ax_mag.axhline(y=1.0, color='blue', linestyle='--', linewidth=1.5, alpha=0.5, label='Baseline (1g)')
-        ax_mag.axhline(y=self.ECCENTRIC_THRESHOLD, color='green', linestyle=':', linewidth=1.5, alpha=0.7, label=f'Eccentric <{self.ECCENTRIC_THRESHOLD}g')
-        ax_mag.axhline(y=self.CONCENTRIC_THRESHOLD, color='red', linestyle=':', linewidth=1.5, alpha=0.7, label=f'Concentric >{self.CONCENTRIC_THRESHOLD}g')
+        # Baseline zones will be drawn dynamically after calibration
         ax_mag.legend(loc='upper right', fontsize=8)
         
         # Plot 2: VBT Mean Velocity History
@@ -344,16 +362,39 @@ class CL837UnifiedMonitor:
         if len(self.mean_velocity_data) > 0:
             vbt_indices = list(range(1, len(self.mean_velocity_data) + 1))
             vbt_values = list(self.mean_velocity_data)
+            mpv_values = list(self.mpv_data)
             self.lines[1].set_data(vbt_indices, vbt_values)
+            
+            # Clear previous text annotations
+            for txt in self.axes[0, 1].texts[:]:
+                txt.remove()
+            
+            # Add MPV text annotations for each rep
+            for i, (x, y, mpv) in enumerate(zip(vbt_indices, vbt_values, mpv_values)):
+                self.axes[0, 1].text(x, y + 0.05, f'{mpv:.3f}',
+                                    ha='center', va='bottom',
+                                    fontsize=8, fontweight='bold',
+                                    color='darkgreen',
+                                    bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', alpha=0.7))
             
             # Update VBT plot limits
             if vbt_indices:
                 self.axes[0, 1].set_xlim(0, max(10, len(vbt_indices) + 1))
                 max_vel = max(vbt_values) if vbt_values else 1.0
-                self.axes[0, 1].set_ylim(0, max(2.0, max_vel * 1.2))
+                self.axes[0, 1].set_ylim(0, max(2.0, max_vel * 1.3))  # Extra margin for text
         
         # Update Y acceleration line (lines[2])
         self.lines[2].set_data(indices, y_list)
+        
+        # Draw baseline zones after calibration (one-time)
+        if self.baseline_calculated and not hasattr(self, 'baseline_zones_drawn'):
+            baseline_upper = self.baseline_value * (1 + self.BASELINE_ZONE)
+            baseline_lower = self.baseline_value * (1 - self.BASELINE_ZONE)
+            self.axes[0, 0].axhline(y=baseline_upper, color='red', linestyle=':', linewidth=1.5, alpha=0.5, label=f'Upper Zone (+{self.BASELINE_ZONE*100:.0f}%)')
+            self.axes[0, 0].axhline(y=baseline_lower, color='green', linestyle=':', linewidth=1.5, alpha=0.5, label=f'Lower Zone (-{self.BASELINE_ZONE*100:.0f}%)')
+            self.axes[0, 0].fill_between([0, self.max_samples], baseline_lower, baseline_upper, color='yellow', alpha=0.1, label='Stable Zone')
+            self.axes[0, 0].legend(loc='upper right', fontsize=8)
+            self.baseline_zones_drawn = True
         
         # Update axes limits automatically
         if indices:
@@ -388,13 +429,12 @@ class CL837UnifiedMonitor:
         
         current_vals = self.last_values
         
-        # State color coding
-        state_colors = {
-            'IDLE': '⚪ IDLE',
-            'ECCENTRIC': '🟢 ECCENTRIC',
-            'CONCENTRIC': '🔴 CONCENTRIC'
-        }
-        state_display = state_colors.get(self.vbt_state, self.vbt_state)
+        # Pattern matching status
+        if self.baseline_calculated:
+            pattern_status = f"🟢 ACTIVE (Buffer: {len(self.magnitude_data)} samples)"
+        else:
+            pattern_status = "⚪ CALIBRATING..."
+        state_display = pattern_status
         
         stats_text = f"""LIVE STATISTICS
 ========================================
@@ -410,10 +450,27 @@ Samples: {self.instant_sample_freq:.1f} Hz
 VBT STATUS
 ========================================
 State: {state_display}
-Reps Completed: {self.rep_count}
-Last Mean Vel: {self.last_mean_velocity:.3f} m/s
-Last Peak Vel: {self.last_peak_velocity:.3f} m/s
-Last Duration: {self.last_rep_duration:.2f}s
+Reps: {self.rep_count}
+
+VELOCITY
+Mean: {self.last_mean_velocity:.3f} m/s
+Peak: {self.last_peak_velocity:.3f} m/s
+MPV: {self.last_mean_propulsive_velocity:.3f} m/s
+Time to Peak: {self.last_time_to_peak_velocity:.3f}s
+
+POWER
+Mean: {self.last_mean_power:.1f} W
+Peak: {self.last_peak_power:.1f} W
+MPP: {self.last_mean_propulsive_power:.1f} W
+
+DISPLACEMENT & TIME
+ROM: {self.last_concentric_displacement:.3f} m
+TUT: {self.last_rep_duration:.2f}s
+Ecc: {self.last_eccentric_duration:.2f}s
+Conc: {self.last_concentric_duration:.2f}s
+
+FATIGUE
+VL%: {self.velocity_loss_percent:.1f}%
 
 CURRENT VALUES
 ========================================
@@ -427,16 +484,17 @@ DEVICE
         
         self.stats_text.set_text(stats_text)
         
-        # Update state indicator on magnitude plot
+        # Update pattern matching indicator on magnitude plot
         if hasattr(self, 'state_text'):
-            state_bg_colors = {
-                'IDLE': 'lightgray',
-                'ECCENTRIC': 'lightgreen',
-                'CONCENTRIC': 'lightcoral'
-            }
-            self.state_text.set_text(f'  {self.vbt_state}  ')
+            if self.baseline_calculated:
+                status_text = 'MONITORING'
+                bg_color = 'lightgreen'
+            else:
+                status_text = 'CALIBRATING'
+                bg_color = 'lightyellow'
+            self.state_text.set_text(f'  {status_text}  ')
             self.state_text.set_bbox(dict(boxstyle='round,pad=0.5', 
-                                         facecolor=state_bg_colors.get(self.vbt_state, 'yellow'), 
+                                         facecolor=bg_color, 
                                          alpha=0.8))
     
     def update_countdown_display(self):
@@ -503,109 +561,256 @@ DEVICE
             print(f"Parsing error: {e}")
             return False
 
-    def process_vbt_state(self, magnitude, y_accel, current_time):
-        """VBT State Machine - Asymmetric thresholds for squat detection"""
-        
-        # STATE: IDLE - Waiting for eccentric start
-        if self.vbt_state == 'IDLE':
-            # Check for sustained drop below eccentric threshold
-            if magnitude < self.ECCENTRIC_THRESHOLD:
-                if self.eccentric_below_threshold_time is None:
-                    self.eccentric_below_threshold_time = current_time
-                elif (current_time - self.eccentric_below_threshold_time) >= self.ECCENTRIC_MIN_DURATION:
-                    # Eccentric phase confirmed (200ms sustained)
-                    self.vbt_state = 'ECCENTRIC'
-                    self.current_rep_start_time = self.eccentric_below_threshold_time
-                    self.current_rep_start_idx = len(self.magnitude_data) - 1
-                    self.eccentric_start_time = self.eccentric_below_threshold_time
-                    self.eccentric_start_idx = self.current_rep_start_idx
-                    print(f"\n🟢 ECCENTRIC START at t={current_time - self.start_time:.2f}s (Mag={magnitude:.3f}g)")
-            else:
-                # Reset if magnitude goes back above threshold
-                self.eccentric_below_threshold_time = None
-        
-        # STATE: ECCENTRIC - Waiting for concentric explosion
-        elif self.vbt_state == 'ECCENTRIC':
-            if magnitude > self.CONCENTRIC_THRESHOLD:
-                # Concentric phase starts!
-                self.vbt_state = 'CONCENTRIC'
-                self.concentric_start_time = current_time
-                self.concentric_start_idx = len(self.magnitude_data) - 1
-                print(f"🔴 CONCENTRIC START at t={current_time - self.start_time:.2f}s (Mag={magnitude:.3f}g)")
-        
-        # STATE: CONCENTRIC - Calculate velocity and wait for return to baseline
-        elif self.vbt_state == 'CONCENTRIC':
-            # Check for return to baseline (magnitude ≈ 1g ± threshold)
-            if abs(magnitude - 1.0) < self.BASELINE_THRESHOLD:
-                # Rep complete!
-                rep_end_time = current_time
-                rep_end_idx = len(self.magnitude_data) - 1
-                
-                # Validate rep duration
-                rep_duration = rep_end_time - self.current_rep_start_time
-                
-                if self.MIN_REP_DURATION <= rep_duration <= self.MAX_REP_DURATION:
-                    # Valid rep - Calculate VBT metrics
-                    self.calculate_vbt_metrics(rep_end_idx)
-                    
-                    self.rep_count += 1
-                    self.last_rep_duration = rep_duration
-                    
-                    print(f"✅ REP #{self.rep_count} COMPLETE - Duration: {rep_duration:.2f}s | Mean Vel: {self.last_mean_velocity:.3f} m/s | Peak Vel: {self.last_peak_velocity:.3f} m/s\n")
-                else:
-                    print(f"❌ Rep rejected - Duration {rep_duration:.2f}s outside range [{self.MIN_REP_DURATION}-{self.MAX_REP_DURATION}s]\n")
-                
-                # Reset to IDLE
-                self.vbt_state = 'IDLE'
-                self.current_rep_start_time = None
-                self.current_rep_start_idx = None
-                self.eccentric_start_time = None
-                self.eccentric_start_idx = None
-                self.concentric_start_time = None
-                self.concentric_start_idx = None
-                self.eccentric_below_threshold_time = None
-
-    def calculate_vbt_metrics(self, rep_end_idx):
-        """Calculate mean velocity for concentric phase"""
-        if self.concentric_start_idx is None or rep_end_idx <= self.concentric_start_idx:
-            self.last_mean_velocity = 0.0
-            self.last_peak_velocity = 0.0
+    def analyze_pattern_buffer(self, current_time):
+        """Analyze buffered signal for pattern matching - runs periodically"""
+        if len(self.magnitude_data) < 20:  # Need minimum samples
             return
         
-        # Extract concentric phase data
-        y_data_list = list(self.y_data)
+        # Calculate baseline from first stable samples if not done
+        if not self.baseline_calculated and len(self.magnitude_data) >= 30:
+            mag_list = list(self.magnitude_data)
+            self.baseline_value = sum(mag_list[:30]) / 30
+            self.baseline_calculated = True
+            print(f"\n📊 Baseline calculated: {self.baseline_value:.3f}g")
+        
+        if not self.baseline_calculated:
+            return
+        
+        baseline_upper = self.baseline_value * (1 + self.BASELINE_ZONE)
+        baseline_lower = self.baseline_value * (1 - self.BASELINE_ZONE)
+        
+        # Classify recent samples into states
+        mag_list = list(self.magnitude_data)
+        time_list = list(self.timestamps_data)
+        
+        # Look for state transitions in buffer
+        state_changes = []
+        prev_state = 'BASE'
+        
+        for i in range(max(0, len(mag_list) - self.ANALYSIS_BUFFER_SIZE), len(mag_list)):
+            mag = mag_list[i]
+            
+            if mag > baseline_upper:
+                current_state = 'ABOVE'
+            elif mag < baseline_lower:
+                current_state = 'BELOW'
+            else:
+                current_state = 'BASE'
+            
+            if current_state != prev_state:
+                state_changes.append({
+                    'idx': i,
+                    'time': time_list[i],
+                    'from': prev_state,
+                    'to': current_state,
+                    'mag': mag
+                })
+                prev_state = current_state
+        
+        # Pattern matching: BASE → movement → BASE
+        for i in range(len(state_changes) - 1):
+            if state_changes[i]['from'] == 'BASE':
+                rep_start_idx = state_changes[i]['idx']
+                rep_start_time = state_changes[i]['time']
+                
+                # Apply refractory period
+                if rep_start_time - self.last_rep_end_time < self.REFRACTORY_PERIOD:
+                    continue
+                
+                # Look for return to BASE
+                for j in range(i + 1, len(state_changes)):
+                    if state_changes[j]['to'] == 'BASE':
+                        rep_end_idx = state_changes[j]['idx']
+                        rep_end_time = state_changes[j]['time']
+                        rep_duration = rep_end_time - rep_start_time
+                        
+                        # Validate duration
+                        if self.MIN_REP_DURATION <= rep_duration <= self.MAX_REP_DURATION:
+                            # Find bottom and concentric peak
+                            rep_segment = mag_list[rep_start_idx:rep_end_idx + 1]
+                            
+                            if len(rep_segment) < 20:  # Need minimum samples
+                                continue
+                            
+                            bottom_relative = rep_segment.index(min(rep_segment))
+                            bottom_idx = rep_start_idx + bottom_relative
+                            bottom_mag = rep_segment[bottom_relative]
+                            
+                            # VALIDATION 1: Check depth - must go below threshold
+                            if bottom_mag >= self.MIN_DEPTH_THRESHOLD:
+                                continue  # Not deep enough for a squat
+                            
+                            # VALIDATION 2: Check eccentric phase has minimum samples
+                            if bottom_relative < self.MIN_ECCENTRIC_SAMPLES:
+                                continue  # Too fast descent = not a controlled squat
+                            
+                            # VALIDATION 3: Check eccentric pattern - magnitude must decrease progressively
+                            eccentric_segment = rep_segment[:bottom_relative + 1]
+                            eccentric_start_mag = eccentric_segment[0]
+                            eccentric_range = eccentric_start_mag - bottom_mag
+                            
+                            if eccentric_range < self.MIN_ECCENTRIC_RANGE:
+                                continue  # Not enough movement = just standing or small oscillation
+                            
+                            # Check for progressive descent (at least 60% of samples should show downward trend)
+                            decreasing_count = sum(1 for i in range(1, len(eccentric_segment)) 
+                                                  if eccentric_segment[i] <= eccentric_segment[i-1])
+                            descent_ratio = decreasing_count / len(eccentric_segment) if len(eccentric_segment) > 1 else 0
+                            
+                            if descent_ratio < 0.3:  # At least 30% progressive descent (relaxed for explosive)
+                                continue  # Not a controlled descent pattern
+                            
+                            # Concentric peak after bottom
+                            if bottom_relative < len(rep_segment) - 1:
+                                concentric_segment = rep_segment[bottom_relative:]
+                                concentric_peak_relative = concentric_segment.index(max(concentric_segment))
+                                concentric_peak_idx = bottom_idx + concentric_peak_relative
+                                
+                                # VALIDATION 4: Check concentric phase has minimum samples
+                                if concentric_peak_relative < self.MIN_CONCENTRIC_SAMPLES:
+                                    continue  # Too fast ascent = not a proper squat
+                                
+                                # VALIDATION 5: Concentric peak should be higher than bottom
+                                peak_mag = concentric_segment[concentric_peak_relative]
+                                if peak_mag <= bottom_mag + 0.05:  # At least 0.05g difference
+                                    continue  # No clear concentric phase
+                                
+                                # VALIDATION 6: Check concentric has sufficient acceleration above baseline
+                                # This ensures real upward movement, not just recovery to standing
+                                max_concentric_accel = max(concentric_segment) - self.baseline_value
+                                if max_concentric_accel < self.MIN_CONCENTRIC_ACCEL:
+                                    continue  # Not enough upward acceleration = no real concentric effort
+                            else:
+                                concentric_peak_idx = rep_end_idx
+                            
+                            # Calculate VBT metrics
+                            self.calculate_vbt_metrics_from_indices(
+                                bottom_idx, concentric_peak_idx, rep_end_idx,
+                                time_list[bottom_idx], time_list[concentric_peak_idx],
+                                rep_start_time, rep_end_time
+                            )
+                            
+                            self.rep_count += 1
+                            self.last_rep_duration = rep_duration
+                            self.last_rep_end_time = rep_end_time
+                            
+                            print(f"\n✅ REP #{self.rep_count} DETECTED (buffered)")
+                            print(f"   Depth: {bottom_mag:.3f}g | Range: {eccentric_range:.3f}g | Descent: {descent_ratio*100:.0f}%")
+                            print(f"   Concentric Accel: {max_concentric_accel:.3f}g | Peak Mag: {peak_mag:.3f}g")
+                            print(f"   Samples: Ecc={bottom_relative} Conc={concentric_peak_relative - bottom_relative}")
+                            print(f"   Duration: TUT={rep_duration:.2f}s | Ecc={self.last_eccentric_duration:.2f}s | Conc={self.last_concentric_duration:.2f}s")
+                            print(f"   Velocity: Mean={self.last_mean_velocity:.3f} m/s | Peak={self.last_peak_velocity:.3f} m/s | MPV={self.last_mean_propulsive_velocity:.3f} m/s")
+                            print(f"   Power: Mean={self.last_mean_power:.1f}W | Peak={self.last_peak_power:.1f}W | MPP={self.last_mean_propulsive_power:.1f}W")
+                            print(f"   ROM: {self.last_concentric_displacement:.3f}m | VL: {self.velocity_loss_percent:.1f}%\n")
+                            
+                            break  # Process one rep at a time
+
+    def calculate_vbt_metrics_from_indices(self, bottom_idx, concentric_peak_idx, rep_end_idx,
+                                           bottom_time, concentric_peak_time, rep_start_time, rep_end_time):
+        """Calculate all VBT metrics from explicit indices"""
+        if concentric_peak_idx <= bottom_idx:
+            self.reset_vbt_metrics()
+            return
+        
+        # Extract concentric phase data (bottom to peak)
+        mag_data_list = list(self.magnitude_data)
         timestamps_list = list(self.timestamps_data)
         
-        concentric_y = y_data_list[self.concentric_start_idx:rep_end_idx + 1]
-        concentric_time = timestamps_list[self.concentric_start_idx:rep_end_idx + 1]
+        concentric_mag = mag_data_list[bottom_idx:concentric_peak_idx + 1]
+        concentric_time = timestamps_list[bottom_idx:concentric_peak_idx + 1]
         
-        if len(concentric_y) < 2:
-            self.last_mean_velocity = 0.0
-            self.last_peak_velocity = 0.0
+        if len(concentric_mag) < 2:
+            self.reset_vbt_metrics()
             return
         
-        # Subtract gravity to get net acceleration
-        y_accel_net = [y - 1.0 for y in concentric_y]
+        # Use the calibrated baseline value (not fixed 1.0)
+        baseline_value = self.baseline_value
+        mag_accel_net = [mag - baseline_value for mag in concentric_mag]
         
-        # Integration: v(t) = v(t-1) + a(t) * dt
-        # Start with v=0 at concentric start (bottom of squat)
+        # DEBUG: Print concentric data for analysis
+        print(f"\n🔍 DEBUG VBT Calculation:")
+        print(f"   Baseline used: {baseline_value:.3f}g")
+        print(f"   Concentric mag range: {min(concentric_mag):.3f}g to {max(concentric_mag):.3f}g")
+        print(f"   Net accel range: {min(mag_accel_net):.3f}g to {max(mag_accel_net):.3f}g")
+        print(f"   Samples in concentric: {len(concentric_mag)}")
+        
+        # Integration: velocity and displacement
         velocity = [0.0]
-        for i in range(1, len(y_accel_net)):
+        displacement = [0.0]
+        for i in range(1, len(mag_accel_net)):
             dt = concentric_time[i] - concentric_time[i-1]
-            v_new = velocity[-1] + y_accel_net[i] * dt
+            v_new = velocity[-1] + mag_accel_net[i] * dt
             velocity.append(v_new)
+            d_new = displacement[-1] + v_new * dt
+            displacement.append(d_new)
         
-        # Calculate metrics
+        # Metriche VBT di base
         positive_velocity = [v for v in velocity if v > 0]
         if positive_velocity:
             self.last_mean_velocity = sum(positive_velocity) / len(positive_velocity)
             self.last_peak_velocity = max(velocity)
+            
+            # Mean Propulsive Velocity (MPV) - solo dove accelerazione è positiva
+            propulsive_indices = [i for i, a in enumerate(mag_accel_net) if a > 0 and i > 0]
+            if propulsive_indices:
+                propulsive_velocities = [velocity[i] for i in propulsive_indices]
+                self.last_mean_propulsive_velocity = sum(propulsive_velocities) / len(propulsive_velocities)
+            else:
+                self.last_mean_propulsive_velocity = 0.0
         else:
             self.last_mean_velocity = 0.0
             self.last_peak_velocity = 0.0
+            self.last_mean_propulsive_velocity = 0.0
+        
+        # Time to Peak Velocity
+        peak_vel_idx = velocity.index(max(velocity))
+        self.last_time_to_peak_velocity = concentric_time[peak_vel_idx] - concentric_time[0]
+        
+        # ROM (Range of Motion)
+        self.last_concentric_displacement = displacement[-1]
+        
+        # Calcolo potenza (P = m * a * v)
+        power = [self.MASS * mag_accel_net[i] * velocity[i] for i in range(len(velocity))]
+        positive_power = [p for p in power if p > 0]
+        if positive_power:
+            self.last_mean_power = sum(positive_power) / len(positive_power)
+            self.last_peak_power = max(power)
+        else:
+            self.last_mean_power = 0.0
+            self.last_peak_power = 0.0
+        
+        # Mean Propulsive Power
+        propulsive_indices = [i for i, a in enumerate(mag_accel_net) if a > 0]
+        if propulsive_indices:
+            propulsive_power = [power[i] for i in propulsive_indices]
+            self.last_mean_propulsive_power = sum(propulsive_power) / len(propulsive_power) if propulsive_power else 0.0
+        else:
+            self.last_mean_propulsive_power = 0.0
+        
+        # Durate
+        self.last_eccentric_duration = bottom_time - rep_start_time
+        self.last_concentric_duration = concentric_time[-1] - concentric_time[0]
+        
+        # Velocity Loss calculation
+        if self.first_rep_mean_velocity is None:
+            self.first_rep_mean_velocity = self.last_mean_velocity
+        if self.first_rep_mean_velocity > 0:
+            self.velocity_loss_percent = ((self.first_rep_mean_velocity - self.last_mean_velocity) / self.first_rep_mean_velocity) * 100
         
         # Add to history
         self.mean_velocity_data.append(self.last_mean_velocity)
+        self.mpv_data.append(self.last_mean_propulsive_velocity)
+    
+    def reset_vbt_metrics(self):
+        """Reset all VBT metrics to zero"""
+        self.last_mean_velocity = 0.0
+        self.last_peak_velocity = 0.0
+        self.last_mean_propulsive_velocity = 0.0
+        self.last_time_to_peak_velocity = 0.0
+        self.last_concentric_displacement = 0.0
+        self.last_mean_power = 0.0
+        self.last_peak_power = 0.0
+        self.last_mean_propulsive_power = 0.0
 
     def parse_multi_sample_frame(self, data):
         """Parse Chileaf frame with possible multiple samples according to 0x0C doc"""
@@ -713,8 +918,10 @@ DEVICE
             self.last_values = {'x': ax_g, 'y': ay_g, 'z': az_g, 'mag': magnitude}
             self.sample_count += 1
             
-            # VBT STATE MACHINE - Process each sample
-            self.process_vbt_state(magnitude, ay_g, current_time)
+            # PATTERN ANALYSIS - Run periodically (not every sample for efficiency)
+            if current_time - self.last_pattern_analysis_time >= self.ANALYSIS_INTERVAL:
+                self.analyze_pattern_buffer(current_time)
+                self.last_pattern_analysis_time = current_time
             
             # Start countdown on first sample
             if self.sample_count == 1 and not self.countdown_active and not self.csv_recording:
