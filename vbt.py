@@ -86,6 +86,9 @@ class CL837VBTMonitor:
         # Refractory period
         self.last_rep_end_time = -self.REFRACTORY_PERIOD
         
+        # Beep timing control
+        self.last_beep_time = 0
+        
         # Baseline calibration
         self.baseline_calculated = False
         self.baseline_samples = []
@@ -541,6 +544,12 @@ LAST REP:
         
         pre_buffer_duration = current_time - self.window_start_time if len(self.window_data_time) > 0 else 0
         print(f"\n🔵 EVENT WINDOW OPENED at {current_time:.2f}s (with {pre_buffer_duration:.2f}s pre-buffer)")
+        
+        # Beep grave apertura finestra (non bloccante, solo se passati >0.5s dall'ultimo)
+        now = time.time()
+        if now - self.last_beep_time > 0.5:
+            self.last_beep_time = now
+            threading.Thread(target=lambda: winsound.Beep(400, 300), daemon=True).start()
     
     def close_and_analyze_window(self, current_time):
         """Chiude finestra e analizza marker per validare squat"""
@@ -725,10 +734,13 @@ LAST REP:
         
         self.last_rep_end_time = peak['time']
         
-        # Beep
-        threading.Thread(target=lambda: winsound.Beep(1000, 200), daemon=True).start()
-        
         print(f"\n🎯 REP #{self.rep_count} COMPLETED - MV: {mean_velocity:.3f} m/s\n")
+        
+        # Beep acuto completamento (non bloccante, solo se passati >0.5s dall'ultimo)
+        now = time.time()
+        if now - self.last_beep_time > 0.5:
+            self.last_beep_time = now
+            threading.Thread(target=lambda: winsound.Beep(1000, 200), daemon=True).start()
 
     def check_event_window(self, current_time, current_idx, magnitude):
         """Sistema a finestra evento per rilevare squat"""
