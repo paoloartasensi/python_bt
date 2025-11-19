@@ -9,6 +9,7 @@ import time
 import struct
 import traceback
 import threading
+import winsound
 from collections import deque
 import matplotlib
 matplotlib.use('TkAgg')
@@ -181,7 +182,7 @@ class CL837VBTMonitor:
         
         # Create 2 subplots: bar chart (top) + oscilloscope (bottom)
         self.fig, (self.ax, self.ax_scope) = plt.subplots(2, 1, figsize=(12, 10), 
-                                                           gridspec_kw={'height_ratios': [2, 1]})
+                                                           gridspec_kw={'height_ratios': [1, 2]})
         self.fig.suptitle("VBT MONITOR - Output Sports Style", fontsize=18, fontweight='bold')
         
         # SUBPLOT 1: Bar chart (top)
@@ -331,12 +332,8 @@ class CL837VBTMonitor:
                                          s=200, marker='o', color='red', edgecolors='black', 
                                          linewidths=2, zorder=10, label='Bottom')
             
-            # Auto-scale Y-axis
-            if mag_list:
-                y_min = min(mag_list)
-                y_max = max(mag_list)
-                y_margin = (y_max - y_min) * 0.1 if y_max > y_min else 0.1
-                self.ax_scope.set_ylim(max(0.5, y_min - y_margin), min(1.5, y_max + y_margin))
+            # Y-axis FISSO 0-4g (non adattivo)
+            self.ax_scope.set_ylim(0, 4.0)
             
             # Update X-axis
             if indices:
@@ -600,6 +597,12 @@ LAST REP:
         self.last_peak_velocity = peak_velocity
         self.last_mpv = mpv
         self.last_rep_end_time = end_time
+        
+        # BEEP ACUTO quando colonna creata
+        try:
+            winsound.Beep(1000, 200)  # 1000 Hz per 200ms
+        except:
+            pass  # Ignora errori se beep non disponibile
         
         # Print rep summary
         print(f"\n✅ REP #{self.rep_count} COMPLETED")
