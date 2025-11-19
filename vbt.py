@@ -12,6 +12,7 @@ import threading
 import winsound
 import numpy as np
 from collections import deque
+from datetime import datetime
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
@@ -337,19 +338,9 @@ class CL837VBTMonitor:
             # Reference lines
             self.ax_scope.axhline(y=1.0, color='blue', linestyle='--', linewidth=1.5, alpha=0.5, label='Baseline (1g)')
             
-            # Highlight current state with background color
-            if self.vbt_state == 'ECCENTRIC':
-                self.ax_scope.axhspan(0, 2, color='red', alpha=0.1, label='ECCENTRIC')
-            elif self.vbt_state == 'CONCENTRIC':
-                self.ax_scope.axhspan(0, 2, color='green', alpha=0.1, label='CONCENTRIC')
-            
-            # Mark bottom position if in concentric
-            if self.vbt_state == 'CONCENTRIC' and self.bottom_idx is not None:
-                bottom_relative = self.bottom_idx - (len(self.magnitude_data) - len(mag_list))
-                if 0 <= bottom_relative < len(mag_list):
-                    self.ax_scope.scatter([bottom_relative], [mag_list[bottom_relative]], 
-                                         s=200, marker='o', color='red', edgecolors='black', 
-                                         linewidths=2, zorder=10, label='Bottom')
+            # Highlight window active with background color
+            if self.window_active:
+                self.ax_scope.axhspan(0, 4, color='blue', alpha=0.05, label='WINDOW ACTIVE')
             
             # Y-axis FISSO 0-4g (non adattivo)
             self.ax_scope.set_ylim(0, 4.0)
@@ -367,8 +358,7 @@ class CL837VBTMonitor:
                 self.ax_scope.axhline(y=self.MIN_DEPTH_MAG, color='orange', linestyle='--', linewidth=1.5, alpha=0.6, label=f'Min Depth ({self.MIN_DEPTH_MAG}g)')
                 self.ax_scope.axhline(y=self.MIN_PEAK_MAG, color='cyan', linestyle='--', linewidth=1.5, alpha=0.6, label=f'Min Peak ({self.MIN_PEAK_MAG}g)')
             
-            # Add state and velocity info as text
-            state_color = {'REST': 'gray', 'ECCENTRIC': 'red', 'CONCENTRIC': 'green'}.get(self.vbt_state, 'black')
+            # Add info text
             current_vel = vel_list[-1] if vel_list else 0.0
             current_mag = mag_list[-1] if mag_list else 0.0
             
@@ -380,10 +370,14 @@ class CL837VBTMonitor:
             else:
                 movement_indicator = "🟡 TRANSITION"
             
-            info_text = f"State: {self.vbt_state} | Mag: {current_mag:.3f}g | Vel: {current_vel:.3f} m/s\nSTD: {self.current_std:.4f}g {movement_indicator}"
+            # Window status
+            window_status = "🔵 WINDOW ACTIVE" if self.window_active else "⏳ WAITING"
+            
+            info_text = f"{window_status} | Mag: {current_mag:.3f}g | Vel: {current_vel:.3f} m/s\nSTD: {self.current_std:.4f}g {movement_indicator}"
+            info_color = 'blue' if self.window_active else 'gray'
             self.ax_scope.text(0.02, 0.98, info_text, transform=self.ax_scope.transAxes,
                               fontsize=10, verticalalignment='top', fontweight='bold',
-                              color=state_color,
+                              color=info_color,
                               bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8))
             
             self.ax_scope.legend(loc='upper right', fontsize=8)
@@ -396,14 +390,11 @@ class CL837VBTMonitor:
         
         if not self.baseline_calculated:
             status = "🔄 CALIBRATING..."
-        elif self.vbt_state == 'REST':
-            status = "⏳ WAITING FOR REP..."
-        elif self.vbt_state == 'ECCENTRIC':
-            status = "⬇️  ECCENTRIC"
-        elif self.vbt_state == 'CONCENTRIC':
-            status = "⬆️  CONCENTRIC"
+        elif self.window_active:
+            window_elapsed = time.time() - self.window_start_time
+            status = f"🔵 WINDOW: {window_elapsed:.1f}s / {self.WINDOW_DURATION:.1f}s"
         else:
-            status = "🔵 MONITORING"
+            status = "⏳ WAITING FOR REP..."
         
         # Velocity Loss calculation
         if len(self.rep_velocities) >= 2:
@@ -592,12 +583,45 @@ LAST REP:
         # === VALIDATE SQUAT ===
         is_valid = self.validate_squat_from_markers()
         
+        # === SAVE SCREENSHOT ===
+        self.save_window_screenshot(is_valid)
+        
         if is_valid:
             self.finalize_rep_from_markers()
         else:
             print("❌ Pattern non valido - NON è uno squat")
         
         self.window_active = False
+    
+    def save_window_screenshot(self, is_valid):
+        """Salva screenshot finestra con marker"""
+        try:
+            fig_s = plt.figure(figsize=(14, 6))
+            ax_s = fig_s.add_subplot(111)
+            times_rel = [(t - self.window_start_time) for t in self.window_data_time]
+            ax_s.plot(times_rel, self.window_data_mag, 'purple', linewidth=2, label='Magnitude', alpha=0.8)
+            ax_s.axhline(y=self.baseline_value, color='blue', linestyle='--', linewidth=1.5)
+            ax_s.axhline(y=self.MIN_DEPTH_MAG, color='orange', linestyle='--', linewidth=1, alpha=0.6)
+            ax_s.axhline(y=self.MIN_PEAK_MAG, color='cyan', linestyle='--', linewidth=1, alpha=0.6)
+            colors = {'counter_movement': 'yellow', 'bottom': 'red', 'peak': 'green', 'deceleration': 'orange'}
+            for name, m in self.markers.items():
+                if m:
+                    t = m['time'] - self.window_start_time
+                    ax_s.scatter([t], [m['mag']], s=200, marker='o', color=colors[name], edgecolors='black', linewidths=2, zorder=10)
+                    ax_s.annotate(f"{m['mag']:.3f}g", xy=(t, m['mag']), xytext=(10, 10), textcoords='offset points', fontsize=9, fontweight='bold', bbox=dict(boxstyle='round', facecolor=colors[name], alpha=0.7))
+            status = "VALID" if is_valid else "REJECTED"
+            ax_s.set_title(f"Event Window - {status}", fontsize=14, fontweight='bold')
+            ax_s.set_xlabel("Time (s)", fontsize=12)
+            ax_s.set_ylabel("Magnitude (g)", fontsize=12)
+            ax_s.set_ylim(0, 2.0)
+            ax_s.grid(True, alpha=0.3)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fname = f"window_{ts}_{status}.png"
+            fig_s.savefig(fname, dpi=150, bbox_inches='tight')
+            plt.close(fig_s)
+            print(f"📸 {fname}")
+        except Exception as e:
+            print(f"⚠️  Screenshot error: {e}")
     
     def validate_squat_from_markers(self):
         """Valida che i marker formino un pattern squat valido"""
@@ -875,159 +899,8 @@ LAST REP:
         # Nota: analisi marker avviene in close_and_analyze_window()
         return
 
-    def old_check_vbt_state_transition_DISABLED(self, current_time, current_idx):
-        """VECCHIA STATE MACHINE - DISABILITATA"""
-        if self.vbt_state == 'REST':
-            # Inizia ECCENTRIC quando scende sotto baseline E c'è movimento reale (STD)
-            if mag_smooth < baseline_lower:
-                if (current_time - self.last_rep_end_time) >= self.REFRACTORY_PERIOD:
-                    # VALIDAZIONE STD: deve esserci movimento, non solo rumore
-                    if self.current_std >= self.MIN_MOVEMENT_STD:
-                        self.vbt_state = 'ECCENTRIC'
-                        self.eccentric_start_time = current_time
-                        self.eccentric_start_idx = current_idx
-                        self.bottom_time = None
-                        self.bottom_idx = None
-                        print(f"⬇️  ECCENTRIC START (mag={mag_smooth:.3f}g, STD={self.current_std:.4f}g ✓)")
-                    else:
-                        # STD troppo bassa = solo rumore, non movimento
-                        pass  # Ignora silenziosamente
-        
-        elif self.vbt_state == 'ECCENTRIC':
-            # Rileva BOTTOM quando magnitudine risale verso baseline
-            # Cerca il minimo locale
-            mag_list = list(self.magnitude_data)
-            if len(mag_list) >= 10:
-                recent_mags = mag_list[-10:]
-                current_mag = mag_list[-1]
-                min_mag = min(recent_mags)
-                
-                # Bottom = minimo raggiunto E sta risalendo
-                if current_mag > min_mag + 0.02:  # Risalendo di almeno 0.02g
-                    eccentric_duration = current_time - self.eccentric_start_time
-                    if eccentric_duration >= self.MIN_ECCENTRIC_WINDOW:
-                        # Trova indice del vero bottom (minimo)
-                        min_idx = len(mag_list) - 10 + recent_mags.index(min_mag)
-                        
-                        # Verifica profondità
-                        if min_mag < self.MIN_DEPTH_MAG:
-                            self.vbt_state = 'CONCENTRIC'
-                            self.bottom_time = current_time - (0.02 * (len(recent_mags) - recent_mags.index(min_mag)))
-                            self.bottom_idx = min_idx
-                            self.concentric_start_time = self.bottom_time
-                            self.concentric_start_idx = min_idx
-                            self.current_velocity = 0.0  # Reset at bottom
-                            self.concentric_peak_mag = 0.0  # Traccia picco concentrico
-                            
-                            # Calcola slope eccentric per template matching
-                            self.eccentric_slope = self.calculate_slope(self.eccentric_start_idx, min_idx)
-                            print(f"🔄 BOTTOM DETECTED (mag={min_mag:.3f}g, ecc_slope={self.eccentric_slope:.3f}g/s) → CONCENTRIC")
-                        else:
-                            print(f"⚠️  Depth insufficiente: {min_mag:.3f}g >= {self.MIN_DEPTH_MAG}g")
-                            self.vbt_state = 'REST'
-        
-        elif self.vbt_state == 'CONCENTRIC':
-            concentric_duration = current_time - self.concentric_start_time
-            
-            # Traccia picco massimo durante concentric
-            if mag_smooth > self.concentric_peak_mag:
-                self.concentric_peak_mag = mag_smooth
-            
-            # Fine CONCENTRIC quando ritorna in zona baseline E si stabilizza (bassa STD)
-            if baseline_lower <= mag_smooth <= baseline_upper:
-                if concentric_duration >= self.MIN_CONCENTRIC_DURATION:
-                    # VALIDAZIONE FINALE: picco + stabilizzazione + template matching
-                    if self.concentric_peak_mag >= self.MIN_PEAK_MAG:
-                        # Verifica stabilizzazione (STD bassa = fermo)
-                        if self.current_std <= self.MAX_NOISE_STD * 1.5:  # Tolleranza 1.5x
-                            # Calcola slope concentric per template matching
-                            self.concentric_slope = self.calculate_slope(self.concentric_start_idx, current_idx)
-                            
-                            # TEMPLATE MATCHING: valida che sia davvero uno squat
-                            if self.validate_squat_template():
-                                print(f"✅ SQUAT VALID (peak={self.concentric_peak_mag:.3f}g, slopes: ecc={self.eccentric_slope:.2f} conc={self.concentric_slope:.2f})")
-                                self.finalize_rep(current_time, current_idx)
-                                self.vbt_state = 'REST'
-                            else:
-                                print(f"❌ Template validation failed - NOT a squat pattern")
-                                self.vbt_state = 'REST'
-                                self.current_velocity = 0.0
-                        # else: attende stabilizzazione completa
-                    else:
-                        print(f"⚠️  Picco insufficiente: {self.concentric_peak_mag:.3f}g < {self.MIN_PEAK_MAG}g - FALSO POSITIVO")
-                        self.vbt_state = 'REST'
-                        self.current_velocity = 0.0
-            
-            # Timeout
-            elif concentric_duration > self.MAX_CONCENTRIC_WINDOW:
-                print(f"⚠️  CONCENTRIC TIMEOUT ({concentric_duration:.1f}s) - Resetting to REST")
-                self.vbt_state = 'REST'
-                self.current_velocity = 0.0
-
-    def finalize_rep(self, end_time, end_idx):
-        """Calculate VBT metrics and finalize rep"""
-        if self.concentric_start_idx is None or end_idx <= self.concentric_start_idx:
-            return
-        
-        # Extract concentric phase
-        mag_list = list(self.magnitude_data)
-        time_list = list(self.timestamps_data)
-        vel_list = list(self.velocity_data)
-        
-        concentric_mag = mag_list[self.concentric_start_idx:end_idx + 1]
-        concentric_time = time_list[self.concentric_start_idx:end_idx + 1]
-        concentric_vel = vel_list[self.concentric_start_idx:end_idx + 1]
-        
-        if len(concentric_vel) < 2:
-            return
-        
-        # Calculate metrics
-        import numpy as np
-        
-        # Mean Velocity (positive only)
-        positive_vel = [v for v in concentric_vel if v > 0]
-        if positive_vel:
-            mean_velocity = np.mean(positive_vel)
-            peak_velocity = np.max(concentric_vel)
-            
-            # Mean Propulsive Velocity (where acceleration > 0)
-            mag_accel = [(concentric_mag[i] - 1.0) * 9.81 for i in range(len(concentric_mag))]
-            propulsive_indices = [i for i, a in enumerate(mag_accel) if a > 0]
-            if propulsive_indices:
-                mpv = np.mean([concentric_vel[i] for i in propulsive_indices])
-            else:
-                mpv = 0.0
-        else:
-            mean_velocity = 0.0
-            peak_velocity = 0.0
-            mpv = 0.0
-        
-        # Store metrics
-        self.rep_count += 1
-        self.rep_numbers.append(self.rep_count)
-        self.rep_velocities.append(mean_velocity)
-        self.last_mean_velocity = mean_velocity
-        self.last_peak_velocity = peak_velocity
-        self.last_mpv = mpv
-        self.last_rep_end_time = end_time
-        
-        # BEEP ACUTO quando colonna creata
-        try:
-            winsound.Beep(1000, 200)  # 1000 Hz per 200ms
-        except:
-            pass  # Ignora errori se beep non disponibile
-        
-        # Print rep summary
-        print(f"\n✅ REP #{self.rep_count} COMPLETED")
-        print(f"   Mean Velocity: {mean_velocity:.3f} m/s")
-        print(f"   Peak Velocity: {peak_velocity:.3f} m/s")
-        print(f"   MPV: {mpv:.3f} m/s")
-        
-        # Velocity Loss
-        if len(self.rep_velocities) >= 2:
-            vl = ((self.rep_velocities[0] - self.rep_velocities[-1]) / self.rep_velocities[0]) * 100
-            print(f"   Velocity Loss: {vl:.1f}%")
-
+    # === OLD STATE MACHINE REMOVED - NOW USING EVENT WINDOW SYSTEM ===
+    
     def notification_handler(self, sender, data):
         """BLE notification handler"""
         try:
