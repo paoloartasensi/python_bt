@@ -10,12 +10,34 @@ import struct
 import traceback
 import threading
 import winsound
+import numpy as np
 from collections import deque
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from bleak import BleakClient, BleakScanner
+
+class KalmanFilter1D:
+    """Kalman Filter 1D semplice per ridurre rumore magnitudine"""
+    def __init__(self, process_variance=1e-5, measurement_variance=1e-2, initial_value=1.0):
+        self.process_variance = process_variance  # Q - quanto cambia il sistema
+        self.measurement_variance = measurement_variance  # R - quanto è rumoroso il sensore
+        self.estimate = initial_value  # Stima corrente
+        self.error_covariance = 1.0  # P - incertezza stima
+    
+    def update(self, measurement):
+        """Aggiorna filtro con nuova misura"""
+        # Prediction
+        predicted_estimate = self.estimate
+        predicted_error_covariance = self.error_covariance + self.process_variance
+        
+        # Update
+        kalman_gain = predicted_error_covariance / (predicted_error_covariance + self.measurement_variance)
+        self.estimate = predicted_estimate + kalman_gain * (measurement - predicted_estimate)
+        self.error_covariance = (1 - kalman_gain) * predicted_error_covariance
+        
+        return self.estimate
 
 class CL837VBTMonitor:
     """Minimalist VBT monitor with Output Sports style bar chart"""
@@ -41,16 +63,20 @@ class CL837VBTMonitor:
         self.velocity_data = deque(maxlen=self.max_samples)
         
         # VBT State Machine - BASATO SU MAGNITUDINE (più affidabile)
-        self.BASELINE_ZONE = 0.08  # ±8% dalla baseline = zona REST
-        self.MIN_DEPTH_MAG = 0.90  # Deve scendere sotto 0.90g per validare squat
+        self.BASELINE_ZONE = 0.06  # ±6% dalla baseline = zona REST (più stretta)
+        self.MIN_DEPTH_MAG = 0.85  # Deve scendere sotto 0.85g per validare squat (più profondo)
+        self.MIN_PEAK_MAG = 1.05  # Picco concentrico deve superare 1.05g (accelerazione reale)
         
-        self.MIN_ECCENTRIC_WINDOW = 0.20  # s - minimo 200ms discesa
-        self.MAX_CONCENTRIC_WINDOW = 2.0  # s - massimo 2s spinta
-        self.MIN_CONCENTRIC_DURATION = 0.15  # s - minimo 150ms spinta
-        self.REFRACTORY_PERIOD = 0.5  # s - pausa tra rep
+        self.MIN_ECCENTRIC_WINDOW = 0.30  # s - minimo 300ms discesa (più lungo)
+        self.MAX_CONCENTRIC_WINDOW = 2.5  # s - massimo 2.5s spinta
+        self.MIN_CONCENTRIC_DURATION = 0.25  # s - minimo 250ms spinta (più lungo)
+        self.REFRACTORY_PERIOD = 0.8  # s - pausa tra rep (più lungo)
         
         self.MAG_SMOOTH_WINDOW = 5  # Smoothing magnitudine
         self.mag_smooth_buffer = deque(maxlen=self.MAG_SMOOTH_WINDOW)
+        
+        # Kalman Filter per magnitudine (riduce rumore e drift)
+        self.kalman_mag = None  # Inizializzato dopo baseline
         
         # State Machine
         self.vbt_state = 'REST'
@@ -312,8 +338,8 @@ class CL837VBTMonitor:
             vel_list = list(self.velocity_data)
             indices = list(range(len(mag_list)))
             
-            # Plot magnitude
-            self.ax_scope.plot(indices, mag_list, 'purple', linewidth=2, alpha=0.8, label='Magnitude')
+            # Plot magnitude (filtrata da Kalman)
+            self.ax_scope.plot(indices, mag_list, 'purple', linewidth=2.5, alpha=0.9, label='Magnitude (Kalman)')
             
             # Reference lines
             self.ax_scope.axhline(y=1.0, color='blue', linestyle='--', linewidth=1.5, alpha=0.5, label='Baseline (1g)')
@@ -345,13 +371,14 @@ class CL837VBTMonitor:
                 baseline_lower = self.baseline_value * (1 - self.BASELINE_ZONE)
                 self.ax_scope.axhline(y=baseline_upper, color='red', linestyle=':', linewidth=1, alpha=0.3)
                 self.ax_scope.axhline(y=baseline_lower, color='green', linestyle=':', linewidth=1, alpha=0.3)
-                self.ax_scope.axhline(y=self.MIN_DEPTH_MAG, color='orange', linestyle='--', linewidth=1, alpha=0.5, label=f'Min Depth ({self.MIN_DEPTH_MAG}g)')
+                self.ax_scope.axhline(y=self.MIN_DEPTH_MAG, color='orange', linestyle='--', linewidth=1.5, alpha=0.6, label=f'Min Depth ({self.MIN_DEPTH_MAG}g)')
+                self.ax_scope.axhline(y=self.MIN_PEAK_MAG, color='cyan', linestyle='--', linewidth=1.5, alpha=0.6, label=f'Min Peak ({self.MIN_PEAK_MAG}g)')
             
             # Add state and velocity info as text
             state_color = {'REST': 'gray', 'ECCENTRIC': 'red', 'CONCENTRIC': 'green'}.get(self.vbt_state, 'black')
             current_vel = vel_list[-1] if vel_list else 0.0
             current_mag = mag_list[-1] if mag_list else 0.0
-            info_text = f"State: {self.vbt_state} | Mag: {current_mag:.3f}g | Vel: {current_vel:.3f} m/s"
+            info_text = f"State: {self.vbt_state} | Mag: {current_mag:.3f}g (Kalman) | Vel: {current_vel:.3f} m/s"
             self.ax_scope.text(0.02, 0.98, info_text, transform=self.ax_scope.transAxes,
                               fontsize=10, verticalalignment='top', fontweight='bold',
                               color=state_color,
@@ -447,27 +474,39 @@ LAST REP:
             self.sample_count += 1
             timestamp = frame_time
             
-            # Store data
-            self.magnitude_data.append(magnitude)
+            # Applica Kalman filter se disponibile
+            if self.kalman_mag is not None:
+                magnitude_filtered = self.kalman_mag.update(magnitude)
+            else:
+                magnitude_filtered = magnitude
+            
+            # Store data (usa magnitudine filtrata)
+            self.magnitude_data.append(magnitude_filtered)
             self.timestamps_data.append(timestamp)
-            self.mag_smooth_buffer.append(magnitude)  # Per smoothing state machine
+            self.mag_smooth_buffer.append(magnitude_filtered)  # Per smoothing state machine
             
             # Baseline calibration (first 25 samples after countdown)
             if not self.baseline_calculated and not self.countdown_active:
                 self.baseline_samples.append(magnitude)
                 if len(self.baseline_samples) >= self.BASELINE_SAMPLES_COUNT:
-                    import numpy as np
                     self.baseline_value = np.median(self.baseline_samples)
                     self.baseline_calculated = True
+                    # Inizializza Kalman con baseline
+                    self.kalman_mag = KalmanFilter1D(
+                        process_variance=1e-5,  # Bassa varianza processo (movimento smooth)
+                        measurement_variance=5e-3,  # Varianza sensore (rumore CL837)
+                        initial_value=self.baseline_value
+                    )
                     print(f"\n✅ BASELINE CALIBRATED: {self.baseline_value:.3f}g")
-                    print("🟢 VBT MONITORING ACTIVE\n")
+                    print("🟢 VBT MONITORING ACTIVE (Kalman Filter enabled)\n")
                 return
             
             # Real-time velocity integration (FIXED 1.0g gravity compensation)
             if self.baseline_calculated and len(self.timestamps_data) >= 2:
                 dt = self.timestamps_data[-1] - self.timestamps_data[-2]
                 # GRAVITY COMPENSATION - Fixed 1.0g (Vitruve/Beast/Enode standard)
-                mag_accel_net = (magnitude - 1.0) * 9.81  # m/s²
+                # USA magnitudine filtrata da Kalman
+                mag_accel_net = (magnitude_filtered - 1.0) * 9.81  # m/s²
                 self.current_velocity = self.current_velocity + mag_accel_net * dt
                 self.velocity_data.append(self.current_velocity)
                 
@@ -530,6 +569,7 @@ LAST REP:
                             self.concentric_start_time = self.bottom_time
                             self.concentric_start_idx = min_idx
                             self.current_velocity = 0.0  # Reset at bottom
+                            self.concentric_peak_mag = 0.0  # Traccia picco concentrico
                             print(f"🔄 BOTTOM DETECTED (mag={min_mag:.3f}g) → CONCENTRIC START")
                         else:
                             print(f"⚠️  Depth insufficiente: {min_mag:.3f}g >= {self.MIN_DEPTH_MAG}g")
@@ -538,12 +578,22 @@ LAST REP:
         elif self.vbt_state == 'CONCENTRIC':
             concentric_duration = current_time - self.concentric_start_time
             
+            # Traccia picco massimo durante concentric
+            if mag_smooth > self.concentric_peak_mag:
+                self.concentric_peak_mag = mag_smooth
+            
             # Fine CONCENTRIC quando ritorna in zona baseline
             if baseline_lower <= mag_smooth <= baseline_upper:
                 if concentric_duration >= self.MIN_CONCENTRIC_DURATION:
-                    print(f"✅ CONCENTRIC END (mag={mag_smooth:.3f}g ritorna baseline)")
-                    self.finalize_rep(current_time, current_idx)
-                    self.vbt_state = 'REST'
+                    # VALIDAZIONE FINALE: deve aver superato MIN_PEAK_MAG
+                    if self.concentric_peak_mag >= self.MIN_PEAK_MAG:
+                        print(f"✅ CONCENTRIC END (mag={mag_smooth:.3f}g, peak={self.concentric_peak_mag:.3f}g)")
+                        self.finalize_rep(current_time, current_idx)
+                        self.vbt_state = 'REST'
+                    else:
+                        print(f"⚠️  Picco insufficiente: {self.concentric_peak_mag:.3f}g < {self.MIN_PEAK_MAG}g - FALSO POSITIVO")
+                        self.vbt_state = 'REST'
+                        self.current_velocity = 0.0
             
             # Timeout
             elif concentric_duration > self.MAX_CONCENTRIC_WINDOW:
