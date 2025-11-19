@@ -17,50 +17,57 @@
 
 ### Perché la Velocità è Superiore all'Accelerazione
 
-Il metodo VBT (Velocity-Based Training) professionale si basa sull'analisi della **velocità verticale** anziché dell'accelerazione. Questo approccio è utilizzato da tutti i dispositivi commerciali leader del settore.
+Il metodo VBT (Velocity-Based Training) professionale si basa sull'analisi della **velocità integrata** dall'accelerazione anziché dall'accelerazione diretta. Questo approccio è utilizzato da tutti i dispositivi commerciali leader del settore.
 
-#### ❌ Problemi con l'Accelerazione:
+#### ❌ Problemi con l'Accelerazione Diretta:
 - **Dipendenza dal carico**: più peso = maggiore accelerazione, rendendo impossibile confrontare ripetizioni con carichi diversi
 - **Dipendenza dalla tecnica**: movimenti esplosivi vs controllati generano pattern diversi
 - **Ambiguità direzionale**: i picchi di accelerazione possono indicare sia salita che discesa
 - **Sensibilità al rumore**: oscillazioni muscolari ad alta frequenza creano falsi positivi
 - **Soglie fisse inadeguate**: una soglia che funziona a 60% 1RM fallisce a 90% 1RM
+- **Dipendenza dall'orientamento**: l'asse Y funziona solo se il sensore è posizionato verticalmente
 
-#### ✅ Vantaggi della Velocità:
+#### ✅ Vantaggi della Velocità Integrata da Magnitudine:
 - **Universalità**: funziona identicamente con 20kg o 200kg
-- **Indipendenza dalla tecnica**: il pattern velocità-negativa→zero→velocità-positiva è invariante
-- **Chiarezza direzionale**: il segno della velocità indica sempre e inequivocabilmente la direzione del movimento
-- **Robustezza al rumore**: l'integrazione dell'accelerazione agisce come filtro passa-basso naturale
+- **Indipendenza dalla tecnica**: il pattern di accelerazione/decelerazione è invariante
+- **Indipendenza dall'orientamento**: usa la magnitudine (norma del vettore), funziona qualunque sia la posizione del sensore
+- **Robustezza al rumore**: l'integrazione agisce come filtro passa-basso naturale
 - **Confrontabilità**: velocità medie possono essere confrontate tra atleti, sessioni, carichi
+- **Praticità**: non serve calibrare l'orientamento del sensore (polso, cintura, bilanciere, ecc.)
 
 ---
 
 ## 📊 Fisica del Movimento
 
-### Le 3 Fasi Universali
+### Approccio Orientation-Agnostic con Magnitudine
 
-Ogni esercizio di forza segue **sempre** questo pattern di velocità verticale:
+⚠️ **IMPORTANTE**: Questo sistema usa la **magnitudine dell'accelerazione** invece dell'accelerazione su singolo asse (Y), rendendo il sistema **indipendente dall'orientamento del sensore**.
+
+### Pattern Universale con Magnitudine
+
+La magnitudine è sempre **positiva** (norma del vettore), quindi il pattern è diverso dallo zero-crossing classico:
 
 ```
-     v > 0  ┃         ╱╲         ← CONCENTRICA (spinta)
-            ┃        ╱  ╲
-            ┃       ╱    ╲
-     v = 0  ┃──────╯      ╰────── ← RIPOSO (inizio/fine)
-            ┃      ↑        ↑
-            ┃   BOTTOM    FINE
-     v < 0  ┃     ╲
-            ┃      ╲              ← ECCENTRICA (discesa)
-            ┃       ╲
+            ┃      ╱╲              ← PICCO CONCENTRICO
+   mag > 1g ┃     ╱  ╲             
+            ┃    ╱    ╲           
+   mag = 1g ┃───╯──────╰────────── ← BASELINE (riposo)
+            ┃  ↑        ↑
+            ┃ START    FINE
+   mag < 1g ┃ ╲                    ← FASE ECCENTRICA (sotto baseline)
+            ┃  ╲___/               
+            ┃    ↑                 ← BOTTOM (minimo)
             ┗━━━━━━━━━━━━━━━━━━━━
               Tempo →
 ```
 
-| Fase | Velocità | Fisica | Durata Tipica |
-|------|----------|--------|---------------|
-| **Eccentrica** | `v < -0.05 m/s` | Gravità + controllo muscolare | 0.5 - 2.5s |
-| **Bottom (Zero-Crossing)** | `v = 0` (da neg→pos) | Inversione di direzione | Istantaneo |
-| **Concentrica** | `v > +0.05 m/s` | Contrazione muscolare concentrica | 0.3 - 2.0s |
-| **Fine Rep** | `v → 0` (da pos→0) | Decelerazione e stabilizzazione | ~0.1s |
+| Fase | Magnitudine | Fisica | Durata Tipica |
+|------|-------------|--------|---------------|
+| **Riposo** | `≈ 1.0g ± 8%` | Accelerazione gravitazionale baseline | Variabile |
+| **Eccentrica** | `< baseline` | Decelerazione controllata verso il basso | 0.5 - 2.5s |
+| **Bottom** | `minimo locale` | Punto più basso, inversione | Istantaneo |
+| **Concentrica** | `> baseline → picco` | Accelerazione esplosiva verso l'alto | 0.3 - 2.0s |
+| **Fine Rep** | `→ baseline` | Ritorno alla stabilità | ~0.1s |
 
 ### Equazioni Fisiche
 
@@ -85,24 +92,31 @@ Dove:
 
 ---
 
-## 🔑 Il Metodo Zero-Crossing
+## 🔑 Il Metodo Pattern-Matching con Magnitudine
 
 ### Concetto Chiave
 
-Lo **zero-crossing** è l'evento più importante nell'analisi VBT:
+Invece dello **zero-crossing classico** (che richiede un asse verticale calibrato), questo sistema usa il **pattern-matching sulla magnitudine**:
 
 ```
-velocità:  NEGATIVA  →  ZERO  →  POSITIVA
-direzione:  ↓ SCENDE  →  STOP  →  ↑ SALE
-fase:      ECCENTRICA → BOTTOM → CONCENTRICA
+magnitudine:  BASELINE  →  SOTTO  →  MINIMO  →  SOPRA  →  BASELINE
+accelerazione:  1.0g    →  <1g    →  bottom  →  >1g   →  1.0g
+fase:          RIPOSO   → ECCENTRICA → BOTTOM → CONCENTRICA → RIPOSO
 ```
 
-Questo punto è:
-- ✅ **Preciso al millisecondo**: rilevabile con estrema accuratezza
+Questo approccio è:
+- ✅ **Orientation-agnostic**: funziona indipendentemente da come posizioni il sensore
 - ✅ **Sempre presente**: in ogni ripetizione valida, indipendentemente dal carico
 - ✅ **Indipendente dal gesto**: stesso pattern per squat, bench, deadlift, etc.
-- ✅ **Facile da implementare**: condizione algebrica semplice `(v[i-1] < 0) AND (v[i] >= 0)`
-- ✅ **Robusto**: non influenzato da oscillazioni o tremori muscolari
+- ✅ **Pratico**: non serve calibrazione dell'orientamento
+- ✅ **Robusto**: usa zone di soglia (±8%) invece di valori assoluti
+
+### Rilevamento Bottom
+
+Il **bottom** (punto più basso) è identificato come:
+- **Minimo locale** della magnitudine durante la fase eccentrica
+- Deve scendere sotto `0.90g` per garantire profondità adeguata
+- Validato con durate minime per evitare falsi positivi
 
 ### Diagramma di Stato
 
@@ -138,46 +152,57 @@ Questo punto è:
 
 ### STEP 1: Preparazione del Segnale
 
-#### 1.1 Estrazione Accelerazione Verticale
+#### 1.1 Estrazione Magnitudine dell'Accelerazione
 
 ```python
-# Asse Y = verticale (convenzione: positivo = verso l'alto)
-y_accel = df['Y_smooth'].values  # già filtrato con Gaussian (sigma=2)
+# Magnitudine = norma del vettore accelerazione (orientation-independent)
+magnitude = df['Magnitude'].values  # sqrt(X² + Y² + Z²), già filtrato con Gaussian (sigma=2)
 timestamps = df['Timestamp'].values
 SAMPLING_RATE = len(timestamps) / (timestamps[-1] - timestamps[0])
 ```
 
-#### 1.2 Rimozione della Gravità
+**Vantaggio della magnitudine:**
+- ✅ Indipendente dall'orientamento del sensore (X, Y, Z)
+- ✅ Sempre positiva (0 a +∞)
+- ✅ Misura l'accelerazione **totale** senza bisogno di saper quale asse è verticale
 
-La gravità è un'accelerazione costante verso il basso che deve essere rimossa:
+#### 1.2 Calcolo della Baseline Gravitazionale
+
+La baseline rappresenta lo stato di riposo (accelerazione gravitazionale):
 
 ```python
-# Calcola baseline gravitazionale (sensore a riposo in piedi = ~1.0g)
-baseline_samples = int(SAMPLING_RATE * 1.0)  # Primo secondo di dati
-baseline_gravity = np.median(y_accel[:baseline_samples])
+# Calcola baseline dai primi campioni stabili (sensore a riposo = ~1.0g)
+baseline_samples = 30  # Primi 30 campioni
+baseline_value = np.median(magnitude[:baseline_samples])
 
-# Sottrai gravità e converti in m/s²
-y_accel_net = (y_accel - baseline_gravity) * 9.81  # m/s²
+# Calcola accelerazione netta (rimuovi baseline)
+mag_accel_net = (magnitude - baseline_value) * 9.81  # m/s²
 ```
 
 **Spiegazione fisica:**
-- Sensore a riposo: legge `+1.0g` (forza di reazione del pavimento)
-- Durante movimento: `a_misurata = a_movimento + a_gravità`
-- Quindi: `a_movimento = a_misurata - 1.0g`
+- Sensore fermo: magnitudine legge `≈1.0g` (accelerazione gravitazionale)
+- Durante movimento: `mag_misurata = sqrt((a_movimento + g)²)`
+- Sottrai baseline per ottenere accelerazione netta del movimento
 
-#### 1.3 Integrazione Numerica: Accelerazione → Velocità
+#### 1.3 Integrazione Numerica: Accelerazione Magnitudine → Velocità
 
 ```python
-velocity = np.zeros(len(y_accel_net))
+velocity = np.zeros(len(mag_accel_net))
 for i in range(1, len(velocity)):
     dt = timestamps[i] - timestamps[i-1]
-    velocity[i] = velocity[i-1] + y_accel_net[i] * dt
+    velocity[i] = velocity[i-1] + mag_accel_net[i] * dt
 ```
 
 **Metodo:** Integrazione di Eulero in avanti (first-order)
 - Pro: semplice, veloce, sufficiente per sampling rate > 30Hz
 - Con: accumula drift su intervalli lunghi (>10s)
-- Soluzione drift: analizza finestre temporali brevi (2-4s per rep)
+- Soluzione drift: reset automatico quando velocità rimane vicina a zero per periodo prolungato
+
+**⚠️ NOTA IMPORTANTE:**
+Poiché la magnitudine è sempre positiva, la velocità integrata **non cambia segno** come nel caso dell'accelerazione Y. Il pattern è:
+- Velocità cresce durante accelerazione (mag > baseline)
+- Velocità decresce durante decelerazione (mag < baseline)
+- Ma resta sempre nello stesso segno (non c'è zero-crossing classico)
 
 #### 1.4 Filtro Anti-Rumore
 
@@ -194,86 +219,74 @@ velocity_filtered = gaussian_filter1d(velocity, sigma=2)
 **Frequenza di taglio equivalente:** `f_cutoff ≈ sampling_rate / (2π·sigma)`
 - Con 50Hz e sigma=2: `f_cutoff ≈ 4 Hz` (perfetto per movimento umano)
 
-### STEP 2: Rilevamento Zero-Crossing
+### STEP 2: Pattern Matching con Magnitudine
 
-#### 2.1 Macchina a Stati
+#### 2.1 Stati della Magnitudine
+
+Invece di una macchina a stati sulla velocità, usiamo **transizioni sulla magnitudine**:
 
 ```python
-# Stati
-STATE_REST = 0        # Riposo
-STATE_LOADING = 1     # Fase di carico (eccentrica/negativa)
-STATE_UNLOADING = 2   # Fase di scarico (concentrica/positiva)
+# Stati basati su soglie magnitudine
+STATE_BASE = 0      # Magnitudine nella zona baseline (±8%)
+STATE_ABOVE = 1     # Magnitudine sopra baseline (accelerazione)
+STATE_BELOW = 2     # Magnitudine sotto baseline (decelerazione)
 
-# Inizializzazione
-state = STATE_REST
-current_rep = None
-valid_reps = []
+# Soglie calcolate da baseline
+baseline_upper = baseline_value * (1 + BASELINE_ZONE)  # +8%
+baseline_lower = baseline_value * (1 - BASELINE_ZONE)  # -8%
 ```
 
-#### 2.2 Loop di Rilevamento
+#### 2.2 Pattern Matching Loop
 
 ```python
-for i in range(1, len(velocity_filtered)):
-    vel = velocity_filtered[i]
-    vel_prev = velocity_filtered[i-1]
-    time = timestamps[i]
+# Classifica samples in stati
+for i in range(len(magnitude)):
+    mag = magnitude[i]
     
-    # ============ STATO: RIPOSO ============
-    if state == STATE_REST:
-        # Cerca inizio fase di carico (velocità negativa stabile)
-        if vel < VEL_THRESHOLD_ECCENTRIC:
-            # Verifica stabilità (non uno spike isolato)
-            if i + 5 < len(velocity_filtered):
-                next_samples = velocity_filtered[i:i+5]
-                if np.mean(next_samples) < VEL_THRESHOLD_ECCENTRIC:
-                    # Movimento verso il basso confermato
-                    state = STATE_LOADING
-                    current_rep = {
-                        'loading_start_idx': i,
-                        'loading_start_time': time
-                    }
+    if mag > baseline_upper:
+        current_state = 'ABOVE'
+    elif mag < baseline_lower:
+        current_state = 'BELOW'
+    else:
+        current_state = 'BASE'
     
-    # ============ STATO: CARICO (ECCENTRICA) ============
-    elif state == STATE_LOADING:
-        # 🎯 CERCA ZERO-CROSSING (chiave dell'algoritmo!)
-        if vel_prev < 0 and vel >= 0:
-            loading_duration = time - current_rep['loading_start_time']
-            
-            # Valida durata minima
-            if loading_duration >= MIN_LOADING_DURATION:
-                # BOTTOM RILEVATO! Transizione a fase di scarico
-                state = STATE_UNLOADING
-                current_rep['bottom_idx'] = i
-                current_rep['bottom_time'] = time
-                current_rep['loading_duration'] = loading_duration
-    
-    # ============ STATO: SCARICO (CONCENTRICA) ============
-    elif state == STATE_UNLOADING:
-        # Cerca fine movimento (velocità torna vicino a zero)
-        if abs(vel) < VEL_THRESHOLD_REST:
-            # Verifica stabilità
-            if i + 5 < len(velocity_filtered):
-                next_samples = velocity_filtered[i:i+5]
-                if np.all(np.abs(next_samples) < VEL_THRESHOLD_CONCENTRIC):
-                    unloading_duration = time - current_rep['bottom_time']
-                    total_duration = time - current_rep['loading_start_time']
-                    
-                    # Valida durate
-                    if (unloading_duration >= MIN_UNLOADING_DURATION and
-                        total_duration <= MAX_REP_DURATION):
-                        # RIPETIZIONE COMPLETATA!
-                        current_rep['unloading_end_idx'] = i
-                        current_rep['unloading_end_time'] = time
-                        current_rep['total_duration'] = total_duration
-                        
-                        # Trova picco velocità
-                        unload_slice = velocity_filtered[current_rep['bottom_idx']:i+1]
-                        peak_vel_idx = np.argmax(unload_slice)
-                        current_rep['peak_velocity_idx'] = current_rep['bottom_idx'] + peak_vel_idx
-                        
-                        valid_reps.append(current_rep)
-                        state = STATE_REST
-                        current_rep = None
+    # Traccia transizioni di stato
+    if current_state != prev_state:
+        state_changes.append({
+            'idx': i,
+            'time': timestamps[i],
+            'from': prev_state,
+            'to': current_state,
+            'mag': mag
+        })
+        prev_state = current_state
+
+# Pattern universale: BASE → movimento → BASE
+for transition in state_changes:
+    if transition['from'] == 'BASE':
+        rep_start_idx = transition['idx']
+        rep_start_time = transition['time']
+        
+        # Cerca ritorno a BASE
+        for next_transition in state_changes[next:]:
+            if next_transition['to'] == 'BASE':
+                rep_end_idx = next_transition['idx']
+                rep_end_time = next_transition['time']
+                
+                # Trova BOTTOM come minimo locale
+                rep_segment = magnitude[rep_start_idx:rep_end_idx+1]
+                bottom_relative = np.argmin(rep_segment)
+                bottom_idx = rep_start_idx + bottom_relative
+                
+                # Valida profondità
+                if magnitude[bottom_idx] < MIN_DEPTH_THRESHOLD:
+                    # RIPETIZIONE VALIDA RILEVATA!
+                    valid_reps.append({
+                        'start_idx': rep_start_idx,
+                        'bottom_idx': bottom_idx,
+                        'end_idx': rep_end_idx,
+                        # ... altre info
+                    })
 ```
 
 ### STEP 3: Calcolo Metriche VBT
@@ -281,9 +294,18 @@ for i in range(1, len(velocity_filtered)):
 #### Mean Velocity (MV)
 
 ```python
-# Media delle velocità positive durante fase concentrica
-conc_velocity = velocity[bottom_idx:end_idx]
-positive_vel = conc_velocity[conc_velocity > 0]
+# Integra velocità dalla magnitudine durante fase concentrica
+concentric_mag = magnitude[bottom_idx:concentric_peak_idx+1]
+mag_accel_net = [(mag - baseline_value) * 9.81 for mag in concentric_mag]
+
+# Integra per ottenere velocità
+velocity = [0.0]
+for i in range(1, len(mag_accel_net)):
+    dt = timestamps[i] - timestamps[i-1]
+    velocity.append(velocity[-1] + mag_accel_net[i] * dt)
+
+# Media delle velocità positive
+positive_vel = [v for v in velocity if v > 0]
 mean_velocity = np.mean(positive_vel) if len(positive_vel) > 0 else 0.0
 ```
 
@@ -337,15 +359,23 @@ rom = displacement[-1]  # metri
 
 ```python
 MASS = 80  # kg (atleta + bilanciere + carico)
-power = MASS * conc_accel * conc_velocity  # Watt
-mean_power = np.mean(power[power > 0])
+
+# Usa accelerazione netta dalla magnitudine
+mag_accel_net = [(mag - baseline_value) * 9.81 for mag in concentric_mag]
+
+# Calcola potenza istantanea
+power = [MASS * mag_accel_net[i] * velocity[i] for i in range(len(velocity))]
+mean_power = np.mean([p for p in power if p > 0])
 peak_power = np.max(power)
 
-# Mean Propulsive Power
-mean_propulsive_power = np.mean(power[propulsive_mask])
+# Mean Propulsive Power (solo dove accel > 0)
+propulsive_mask = [a > 0 for a in mag_accel_net]
+mean_propulsive_power = np.mean([power[i] for i in range(len(power)) if propulsive_mask[i]])
 ```
 
 **Formula:** `P = m · a · v`
+- `a` = accelerazione netta dalla magnitudine (m/s²)
+- `v` = velocità integrata (m/s)
 - Correlata con performance esplosiva
 - Peak power: indicatore principale per sport di potenza
 - Mean propulsive power: misura sostenibilità dello sforzo
@@ -475,55 +505,67 @@ else:
 
 ---
 
-## 🎭 Indipendenza dal Gesto Tecnico
+## 🎭 Indipendenza dal Gesto Tecnico E dall'Orientamento
 
-### Pattern Universale
+### Pattern Universale con Magnitudine
 
-**Regola d'oro:** Ogni esercizio di forza è una sequenza:
+**Regola d'oro:** Ogni esercizio di forza è una sequenza sulla magnitudine:
 
 ```
-RIPOSO → CARICO → INVERSIONE → SCARICO → RIPOSO
+BASELINE → SOTTO BASELINE → MINIMO → SOPRA BASELINE → BASELINE
 ```
 
-Questo pattern si applica identicamente a:
+Questo pattern:
+- ✅ **Funziona con qualsiasi esercizio** (squat, bench, deadlift, OHP, pull-up, etc.)
+- ✅ **Funziona con qualsiasi orientamento del sensore** (polso, cintura, bilanciere, caviglia, etc.)
+- ✅ **Non richiede calibrazione** dell'asse verticale
+- ✅ **Universale per tutti gli atleti e carichi**
 
-| Esercizio | Carico (Eccentrica) | Inversione (Bottom) | Scarico (Concentrica) |
-|-----------|---------------------|---------------------|----------------------|
-| **Squat** | Discesa controllata | Punto più basso | Spinta verso l'alto |
-| **Bench Press** | Barra verso petto | Contatto con petto | Spinta verso lock |
-| **Deadlift** | (Minima/assente) | Floor contact | Pull esplosivo |
-| **Overhead Press** | (Optional dip) | Spalle | Press verso lock |
-| **Pull-up** | Hanging (optional) | Bottom position | Pull verso chin |
+Il pattern si applica identicamente a:
 
-### Algoritmo Exercise-Agnostic
+| Esercizio | Sotto Baseline | Minimo (Bottom) | Sopra Baseline | Posizione Sensore |
+|-----------|----------------|-----------------|----------------|-------------------|
+| **Squat** | Discesa controllata | Punto più basso | Spinta esplosiva | Polso, cintura, bilanciere |
+| **Bench Press** | Barra verso petto | Contatto petto | Spinta verso lock | Polso, bilanciere |
+| **Deadlift** | (Setup) | Floor/inizio pull | Pull esplosivo | Polso, cintura, bilanciere |
+| **Overhead Press** | (Dip opzionale) | Spalle | Press esplosivo | Polso, bilanciere |
+| **Pull-up** | Hanging | Bottom | Pull verso chin | Polso, cintura |
+| **Jump Squat** | Countermovement | Bottom | Jump takeoff | Polso, cintura, caviglia |
+
+### Algoritmo Exercise-Agnostic E Orientation-Agnostic
 
 ```python
 """
-UNIVERSAL PATTERN DETECTOR
-Nessuna conoscenza specifica dell'esercizio richiesta
-Funziona per qualsiasi movimento con pattern velocity-based
+UNIVERSAL PATTERN DETECTOR WITH MAGNITUDE
+- Nessuna conoscenza specifica dell'esercizio richiesta
+- Nessuna calibrazione dell'orientamento richiesta
+- Funziona con sensore su qualsiasi parte del corpo/attrezzatura
 """
 
-# Classificazione automatica delle fasi
-def classify_phase(velocity):
-    """Classifica fase basandosi SOLO sulla velocità"""
-    if abs(velocity) < VEL_THRESHOLD_REST:
-        return 'REST'
-    elif velocity < VEL_THRESHOLD_ECCENTRIC:
-        return 'LOADING'   # Fase di carico (qualsiasi direzione "negativa")
-    elif velocity > VEL_THRESHOLD_CONCENTRIC:
-        return 'UNLOADING' # Fase di scarico (qualsiasi direzione "positiva")
+# Classificazione automatica delle fasi basata SOLO su magnitudine
+def classify_magnitude_state(magnitude, baseline_value, zone_pct=0.08):
+    """Classifica stato basandosi SOLO sulla magnitudine"""
+    baseline_upper = baseline_value * (1 + zone_pct)
+    baseline_lower = baseline_value * (1 - zone_pct)
+    
+    if magnitude > baseline_upper:
+        return 'ABOVE'      # Accelerazione sopra baseline
+    elif magnitude < baseline_lower:
+        return 'BELOW'      # Accelerazione sotto baseline
     else:
-        return 'TRANSITION'
+        return 'BASE'       # Zona stabile
 
-# Pattern universale: REST → LOADING → ZERO-CROSS → UNLOADING → REST
-# - Squat: standing → down → bottom → up → standing
-# - Bench: locked → down → chest → up → locked
-# - Deadlift: floor → (skip) → pull → lockout → floor
-# - OHP: shoulders → dip → bottom → press → lockout
-# - Jump: standing → countermovement → bottom → jump → landing
+# Pattern universale: BASE → BELOW/ABOVE → BASE
+# - Squat (sensore su polso): standing → down/up → standing
+# - Bench (sensore su bilanciere): locked → down/chest/up → locked
+# - Deadlift (sensore su cintura): setup → pull → lockout
+# - Jump (sensore su caviglia): standing → countermovement/jump → landing
 
-# NESSUN if/else basato sul tipo di esercizio!
+# NESSUN if/else basato su:
+# - Tipo di esercizio
+# - Orientamento del sensore
+# - Posizione del sensore sul corpo
+# - Asse verticale (X, Y, o Z)
 ```
 
 ### Esempio Pratico: Stesso Codice, Esercizi Diversi
@@ -562,31 +604,31 @@ Tutte le metriche sono valide e confrontabili perché basate sullo stesso patter
 
 ### DO: Raccomandazioni Obbligatorie
 
-#### 1. Calibrazione Baseline
+#### 1. Calibrazione Baseline (Magnitudine)
 
 ```python
-# ✅ CORRETTO: Usa primi campioni stabili
-baseline_samples = int(SAMPLING_RATE * 1.0)  # Primo secondo
-baseline_gravity = np.median(y_accel[:baseline_samples])
+# ✅ CORRETTO: Usa primi campioni stabili della magnitudine
+baseline_samples = 30  # Primi 30 campioni (1 secondo a 30Hz)
+baseline_value = np.median(magnitude[:baseline_samples])
 
 # ❌ SBAGLIATO: Valore hardcoded
-baseline_gravity = 1.0  # Sensore può leggere 0.98-1.02g a riposo!
+baseline_value = 1.0  # La magnitudine può variare da 0.95g a 1.05g a riposo!
 ```
 
-#### 2. Doppio Filtro (Accelerazione + Velocità)
+#### 2. Filtro Gaussiano sulla Magnitudine
 
 ```python
-# ✅ CORRETTO: Filtra accelerazione prima di integrare
-y_accel_smooth = gaussian_filter1d(y_accel, sigma=2)
-y_accel_net = (y_accel_smooth - baseline_gravity) * 9.81
-velocity = integrate(y_accel_net)
-velocity_filtered = gaussian_filter1d(velocity, sigma=2)  # Filtro anche velocità
+# ✅ CORRETTO: Filtra magnitudine prima di integrare
+magnitude_smooth = gaussian_filter1d(magnitude, sigma=2)
+mag_accel_net = (magnitude_smooth - baseline_value) * 9.81
+velocity = integrate(mag_accel_net)
 
-# ❌ SBAGLIATO: Filtra solo velocità
-y_accel_net = (y_accel - baseline_gravity) * 9.81  # Raw, non filtrato
-velocity = integrate(y_accel_net)  # Accumula rumore!
-velocity_filtered = gaussian_filter1d(velocity, sigma=2)  # Troppo tardi
+# ❌ SBAGLIATO: Integra magnitudine raw
+mag_accel_net = (magnitude - baseline_value) * 9.81  # Raw, troppo rumoroso!
+velocity = integrate(mag_accel_net)  # Accumula rumore!
 ```
+
+**Nota:** Con la magnitudine, un solo filtro è spesso sufficiente perché la norma del vettore già "filtra" naturalmente oscillazioni su singoli assi.
 
 #### 3. Validazione Durate
 
@@ -646,30 +688,39 @@ print(f"Reps detected: {len(reps)}")  # Come debuggi se fallisce?
 
 ### DON'T: Errori da Evitare
 
-#### ❌ 1. NON usare solo soglie di accelerazione
+#### ❌ 1. NON usare solo soglie assolute di magnitudine
 
 ```python
-# ❌ APPROCCIO SBAGLIATO (usato da principianti)
-if acceleration > 2.0:  # m/s²
+# ❌ APPROCCIO SBAGLIATO
+if magnitude > 1.2:  # g
     concentric_start = True
-# Problema: dipende da carico, tecnica, sensore
+# Problema: dipende da carico, atleta, tecnica
+# Usa soglie RELATIVE alla baseline invece!
 ```
 
-#### ❌ 2. NON integrare senza rimuovere gravità
+#### ❌ 2. NON integrare magnitudine senza rimuovere baseline
 
 ```python
 # ❌ SBAGLIATO
-velocity = integrate(y_accel * 9.81)
-# Risultato: drift massiccio, velocità aumenta continuamente!
+velocity = integrate(magnitude * 9.81)
+# Risultato: velocità cresce all'infinito!
+# La baseline gravitazionale DEVE essere sottratta
+
+# ✅ CORRETTO
+mag_accel_net = (magnitude - baseline_value) * 9.81
+velocity = integrate(mag_accel_net)
 ```
 
-#### ❌ 3. NON rilevare bottom come "minimo di magnitudine"
+#### ❌ 3. NON assumere che il sensore sia orientato verticalmente
 
 ```python
-# ❌ SBAGLIATO
-bottom_idx = np.argmin(magnitude)
-# Problema: magnitudine non indica direzione!
-# Il minimo potrebbe essere durante salita veloce
+# ❌ SBAGLIATO - Assume Y = verticale
+y_accel_net = (y_accel - 1.0) * 9.81
+# Problema: funziona solo se Y è perfettamente verticale!
+
+# ✅ CORRETTO - Usa magnitudine (orientation-free)
+mag_accel_net = (magnitude - baseline_value) * 9.81
+# Funziona con qualsiasi orientamento!
 ```
 
 #### ❌ 4. NON validare reps solo su durata totale
@@ -708,18 +759,21 @@ velocity[i] = velocity[i-1] + accel[i] * dt
 
 Prima di deployare in produzione, verifica:
 
-- [ ] Baseline calibrata da dati reali (non hardcoded)
-- [ ] Filtro gaussiano applicato sia ad accelerazione che velocità
-- [ ] Gravità rimossa correttamente (9.81 m/s² con segno corretto)
-- [ ] Zero-crossing rilevato con condizione algebrica precisa
-- [ ] Validazioni su durate di TUTTE le fasi (non solo totale)
-- [ ] Refractory period implementato
+- [ ] Baseline calibrata dalla magnitudine (primi 30 campioni)
+- [ ] Filtro gaussiano applicato alla magnitudine (sigma=2)
+- [ ] Baseline gravitazionale rimossa dalla magnitudine
+- [ ] Pattern matching BASE → movimento → BASE implementato
+- [ ] Bottom rilevato come minimo locale con validazione profondità
+- [ ] Validazioni su durate di TUTTE le fasi (eccentrica, concentrica, totale)
+- [ ] Refractory period implementato (evita rilevamenti multipli)
 - [ ] Verifica stabilità per trigger (non single-sample)
-- [ ] Parametri adattivi (non valori fissi hardcoded)
-- [ ] Visualizzazione velocità per debug
+- [ ] Parametri adattivi relativi alla baseline (±8% zone)
+- [ ] Visualizzazione magnitudine + velocità integrata per debug
 - [ ] Test con carichi diversi (60%, 80%, 90% 1RM)
 - [ ] Test con atleti diversi (principiante, intermedio, avanzato)
-- [ ] Test con esercizi diversi (squat, bench, deadlift)
+- [ ] Test con esercizi diversi (squat, bench, deadlift, OHP, pull-up)
+- [ ] Test con orientamenti diversi del sensore (polso, cintura, bilanciere)
+- [ ] Reset automatico velocità per prevenire drift
 
 ---
 
@@ -906,9 +960,33 @@ Per implementare questo metodo nel tuo progetto:
 
 **📝 Autore:** Paolo Artasensi  
 **📅 Data:** 19 Novembre 2025  
-**🔧 Versione:** 2.0 (Adaptive Parameters)  
+**🔧 Versione:** 3.0 (Orientation-Agnostic with Magnitude)  
 **📄 Licenza:** MIT  
 **📦 Repository:** python_bt
+
+---
+
+## 🆕 Changelog v3.0 (19 Nov 2025)
+
+**BREAKING CHANGE:** Sistema completamente rivisto per usare magnitudine invece di accelerazione Y
+
+### Modifiche principali:
+- ✅ **Magnitudine come segnale primario**: usa `sqrt(X² + Y² + Z²)` invece di solo Y
+- ✅ **Orientation-agnostic**: funziona indipendentemente dall'orientamento del sensore
+- ✅ **Pattern matching**: BASE → BELOW/ABOVE → BASE invece di zero-crossing classico
+- ✅ **Bottom detection**: minimo locale della magnitudine con validazioni
+- ✅ **Universal placement**: sensore funziona su polso, cintura, bilanciere, caviglia, etc.
+
+### Vantaggi:
+- No calibrazione orientamento richiesta
+- Funziona con sensore in qualsiasi posizione
+- Stesso algoritmo per tutti gli esercizi
+- Riduce complessità setup
+- Più robusto a rotazioni/movimenti del sensore
+
+### Limitazioni:
+- La magnitudine è sempre positiva (no zero-crossing classico sulla velocità)
+- Pattern diverso rispetto ai dispositivi lineari (GymAware, Vitruve che usano encoder/IMU calibrati)
 
 ---
 
