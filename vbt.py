@@ -63,7 +63,11 @@ class CL837VBTMonitor:
         self.current_std = 0.0
         
         # Event Window System - Finestra temporale per analisi marker
-        self.WINDOW_DURATION = 3.0  # 3 secondi di registrazione dopo break baseline
+        self.WINDOW_DURATION = 2.5  # 2.5 secondi di registrazione dopo break baseline
+        self.PRE_BUFFER_SIZE = 25  # 0.5s @ 50Hz - buffer pre-finestra
+        self.pre_buffer_mag = deque(maxlen=self.PRE_BUFFER_SIZE)
+        self.pre_buffer_time = deque(maxlen=self.PRE_BUFFER_SIZE)
+        self.pre_buffer_idx = deque(maxlen=self.PRE_BUFFER_SIZE)
         self.window_active = False
         self.window_start_time = None
         self.window_start_idx = None
@@ -473,6 +477,12 @@ LAST REP:
             self.mag_smooth_buffer.append(magnitude)  # Per smoothing state machine
             self.mag_std_buffer.append(magnitude)  # Per calcolo STD
             
+            # Popola pre-buffer continuamente (solo se non in finestra attiva)
+            if not self.window_active:
+                self.pre_buffer_mag.append(magnitude)
+                self.pre_buffer_time.append(timestamp)
+                self.pre_buffer_idx.append(self.sample_count - 1)
+            
             # Calcola STD corrente (variabilità movimento)
             if len(self.mag_std_buffer) >= 10:
                 self.current_std = np.std(list(self.mag_std_buffer))
@@ -506,20 +516,31 @@ LAST REP:
             print(f"Unpack error: {e}")
 
     def open_event_window(self, current_time, current_idx):
-        """Apre finestra di 3 secondi per analisi movimento"""
+        """Apre finestra di 2.5s per analisi movimento (con pre-buffer 0.5s)"""
         self.window_active = True
-        self.window_start_time = current_time
-        self.window_start_idx = current_idx
-        self.window_data_mag = []
-        self.window_data_time = []
-        self.window_data_idx = []
+        
+        # Includi pre-buffer nei dati finestra
+        self.window_data_mag = list(self.pre_buffer_mag)
+        self.window_data_time = list(self.pre_buffer_time)
+        self.window_data_idx = list(self.pre_buffer_idx)
+        
+        # Il "vero" start time è quello del primo sample nel pre-buffer
+        if len(self.window_data_time) > 0:
+            self.window_start_time = self.window_data_time[0]
+            self.window_start_idx = self.window_data_idx[0]
+        else:
+            self.window_start_time = current_time
+            self.window_start_idx = current_idx
+        
         self.markers = {
             'counter_movement': None,
             'bottom': None,
             'peak': None,
             'deceleration': None
         }
-        print(f"\n🔵 EVENT WINDOW OPENED at {current_time:.2f}s (baseline break detected)")
+        
+        pre_buffer_duration = current_time - self.window_start_time if len(self.window_data_time) > 0 else 0
+        print(f"\n🔵 EVENT WINDOW OPENED at {current_time:.2f}s (with {pre_buffer_duration:.2f}s pre-buffer)")
     
     def close_and_analyze_window(self, current_time):
         """Chiude finestra e analizza marker per validare squat"""
