@@ -73,6 +73,8 @@ class CL837UnifiedMonitor:
         self.last_rep_end_time = -self.REFRACTORY_PERIOD
         self.baseline_value = 1.0  # Will be calculated from first samples
         self.baseline_calculated = False
+        self.baseline_samples = []  # Accumulate first samples for baseline calculation
+        self.BASELINE_SAMPLES_COUNT = 25  # Number of samples to use for baseline (~0.5s at 50Hz)
         
         # Velocity smoothing buffer for state detection
         self.velocity_smooth_buffer = deque(maxlen=self.VEL_SMOOTH_WINDOW)
@@ -1015,18 +1017,14 @@ DEVICE
             if self.baseline_calculated and len(self.timestamps_data) >= 2:
                 # Calculate dt from last timestamp
                 dt = self.timestamps_data[-1] - self.timestamps_data[-2]
-                # Net acceleration from magnitude (remove baseline gravity)
-                mag_accel_net = (magnitude - self.baseline_value) * 9.81  # m/s²
+                # GRAVITY COMPENSATION - Sottrai SEMPRE 1.0g fisso (come Vitruve, Beast, Enode, Metric VBT)
+                mag_accel_net = (magnitude - 1.0) * 9.81  # m/s²
                 # Integrate: v = v0 + a*dt
                 self.current_velocity = self.current_velocity + mag_accel_net * dt
                 self.velocity_data.append(self.current_velocity)
                 
-                # Reset velocity when back to stable position (near zero velocity for extended period)
-                if abs(self.current_velocity) < 0.05 and len(self.velocity_data) >= 10:
-                    # Check if velocity has been near zero for last 10 samples
-                    recent_vel = list(self.velocity_data)[-10:]
-                    if all(abs(v) < 0.1 for v in recent_vel):
-                        self.current_velocity = 0.0  # Reset to prevent drift
+                # DISABLED: Auto-reset was too aggressive and interfered with rep detection
+                # Only rely on state machine to manage velocity
             else:
                 # Not calibrated yet or first sample
                 self.velocity_data.append(0.0)
@@ -1038,13 +1036,40 @@ DEVICE
             # Add to velocity smoothing buffer
             self.velocity_smooth_buffer.append(self.current_velocity)
             
-            # REAL-TIME STATE MACHINE - Check EVERY sample (like commercial devices)
-            if self.baseline_calculated:
-                self.check_vbt_state_transition(current_time, len(self.velocity_data) - 1)
+            # CALIBRATION SEQUENCE:
+            # 1. First sample -> Start countdown
+            # 2. After countdown -> Start baseline calibration
+            # 3. After 50 stable samples -> Start VBT monitoring
             
             # Start countdown on first sample
             if self.sample_count == 1 and not self.countdown_active and not self.csv_recording:
                 self.start_countdown()
+            
+            # BASELINE CALIBRATION - Start only after countdown finishes
+            if not self.baseline_calculated:
+                # Check if countdown has finished
+                if self.countdown_active:
+                    # Still counting down - don't start calibration yet
+                    pass
+                elif not self.csv_recording:
+                    # Countdown finished but CSV not started yet - wait for CSV to start
+                    pass
+                else:
+                    # CSV recording active - now we can calibrate
+                    self.baseline_samples.append(magnitude)
+                    
+                    if len(self.baseline_samples) >= self.BASELINE_SAMPLES_COUNT:
+                        # Calculate baseline as mean of first samples (should be ~1g at rest)
+                        self.baseline_value = sum(self.baseline_samples) / len(self.baseline_samples)
+                        self.baseline_calculated = True
+                        print(f"\n✅ BASELINE CALIBRATED: {self.baseline_value:.3f}g (from {self.BASELINE_SAMPLES_COUNT} samples)")
+                        print(f"   VBT monitoring ACTIVE - Ready to detect reps\n")
+                        # Reset velocity to start fresh after calibration
+                        self.current_velocity = 0.0
+            
+            # REAL-TIME STATE MACHINE - Check EVERY sample (like commercial devices)
+            if self.baseline_calculated:
+                self.check_vbt_state_transition(current_time, len(self.velocity_data) - 1)
             
             # Record to CSV (with timestamp relative to start) - only if recording is active
             if self.csv_recording:
