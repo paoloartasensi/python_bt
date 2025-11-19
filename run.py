@@ -77,6 +77,9 @@ class CL837UnifiedMonitor:
         # Velocity smoothing buffer for state detection
         self.velocity_smooth_buffer = deque(maxlen=self.VEL_SMOOTH_WINDOW)
         
+        # State history for visualization
+        self.state_history = deque(maxlen=10)  # Last 10 reps for temporal display
+        
         # VBT Results - Extended metrics
         self.rep_count = 0
         self.mean_velocity_data = deque(maxlen=50)  # Last 50 reps
@@ -313,14 +316,17 @@ class CL837UnifiedMonitor:
         ax_vbt.grid(True, alpha=0.3)
         ax_vbt.set_ylim(0, 2.0)  # Typical squat velocity range
         
-        # Plot 3: Y Acceleration (vertical)
-        ax_y.set_title("Y Acceleration (Vertical)", fontweight='bold')
-        ax_y.set_xlabel("Samples")
-        ax_y.set_ylabel("Y (g)")
-        ax_y.grid(True, alpha=0.3)
-        ax_y.axhline(y=1.0, color='gray', linestyle='--', linewidth=1, alpha=0.5, label='Gravity (1g)')
-        ax_y.axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.5)
-        ax_y.legend(loc='upper right', fontsize=8)
+        # Plot 3: VBT Temporal Windows (Real-Time State Visualization)
+        ax_y.set_title("VBT State Machine (Real-Time)", fontweight='bold', color='darkgreen')
+        ax_y.set_xlabel("Time (last 10 reps)")
+        ax_y.set_ylabel("State")
+        ax_y.set_ylim(-0.5, 3.5)
+        ax_y.set_yticks([0, 1, 2, 3])
+        ax_y.set_yticklabels(['REST', 'ECCENTRIC', 'BOTTOM', 'CONCENTRIC'])
+        ax_y.grid(True, alpha=0.3, axis='x')
+        ax_y.axhline(y=0.5, color='gray', linestyle=':', linewidth=0.5, alpha=0.3)
+        ax_y.axhline(y=1.5, color='gray', linestyle=':', linewidth=0.5, alpha=0.3)
+        ax_y.axhline(y=2.5, color='gray', linestyle=':', linewidth=0.5, alpha=0.3)
         
         # Statistics area
         ax_stats.set_title("Live Statistics + VBT")
@@ -329,10 +335,13 @@ class CL837UnifiedMonitor:
         # Initialize lines
         line_mag, = ax_mag.plot([], [], 'purple', linewidth=2.5, alpha=0.8, label='Magnitude')
         line_vbt, = ax_vbt.plot([], [], 'o-', color='darkblue', linewidth=2, markersize=8, markerfacecolor='cyan', markeredgecolor='darkblue', markeredgewidth=2)
-        line_y, = ax_y.plot([], [], 'g-', linewidth=2, alpha=0.8, label='Y Accel')
         line_velocity, = self.ax_velocity.plot([], [], 'navy', linewidth=2, linestyle='--', alpha=0.8, label='Velocity')
         
-        self.lines = [line_mag, line_vbt, line_y, line_velocity]
+        self.lines = [line_mag, line_vbt, line_velocity]
+        
+        # VBT temporal windows tracking
+        self.vbt_windows = []  # List of dicts with {rep_num, ecc_start, bottom, conc_end, durations}
+        self.ax_temporal = ax_y  # Reference for temporal window plot
         
         # Add state indicator text on magnitude plot
         self.state_text = ax_mag.text(0.02, 0.98, '', transform=ax_mag.transAxes,
@@ -405,13 +414,10 @@ class CL837UnifiedMonitor:
                 max_vel = max(vbt_values) if vbt_values else 1.0
                 self.axes[0, 1].set_ylim(0, max(2.0, max_vel * 1.3))  # Extra margin for text
         
-        # Update Y acceleration line (lines[2])
-        self.lines[2].set_data(indices, y_list)
-        
-        # Update velocity line (lines[3]) on second Y-axis
+        # Update velocity line (lines[2]) on second Y-axis
         if len(self.velocity_data) > 0:
             vel_list = list(self.velocity_data)
-            self.lines[3].set_data(indices, vel_list)
+            self.lines[2].set_data(indices, vel_list)
             
             # Update velocity axis limits
             if vel_list:
@@ -419,6 +425,9 @@ class CL837UnifiedMonitor:
                 vel_range = max(abs(vel_min), abs(vel_max))
                 margin = vel_range * 0.2 + 0.1
                 self.ax_velocity.set_ylim(-vel_range - margin, vel_range + margin)
+        
+        # Update temporal windows bar plot
+        self.update_temporal_windows_plot()
         
         # Draw baseline zones after calibration (one-time)
         if self.baseline_calculated and not hasattr(self, 'baseline_zones_drawn'):
@@ -439,12 +448,8 @@ class CL837UnifiedMonitor:
                 margin = (mag_max - mag_min) * 0.1 + 0.1
                 self.axes[0, 0].set_ylim(mag_min - margin, mag_max + margin)
             
-            # Y acceleration plot - Dynamic axes
-            self.axes[1, 0].set_xlim(max(0, len(indices)-200), len(indices))
-            if y_list:
-                y_min, y_max = min(y_list), max(y_list)
-                margin = (y_max - y_min) * 0.1 + 0.1
-                self.axes[1, 0].set_ylim(y_min - margin, y_max + margin)
+            # Temporal window plot - Update bars
+            self.update_temporal_windows_plot()
         
         # Update statistics
         self.update_statistics_display()
@@ -454,6 +459,111 @@ class CL837UnifiedMonitor:
         
         return self.lines + [self.stats_text]
 
+    def update_temporal_windows_plot(self):
+        """Update the temporal windows bar plot showing VBT states"""
+        # Clear previous bars
+        self.ax_temporal.clear()
+        
+        # Reconfigure axes
+        self.ax_temporal.set_title("VBT State Machine (Real-Time)", fontweight='bold', color='darkgreen')
+        self.ax_temporal.set_xlabel("Rep Number")
+        self.ax_temporal.set_ylabel("Phase Duration (s)")
+        self.ax_temporal.grid(True, alpha=0.3, axis='y')
+        
+        if not self.state_history:
+            self.ax_temporal.text(0.5, 0.5, 'Waiting for first rep...', 
+                                 transform=self.ax_temporal.transAxes,
+                                 ha='center', va='center', fontsize=12, color='gray')
+            return
+        
+        # Prepare data for stacked bars
+        rep_nums = [entry['rep_num'] for entry in self.state_history]
+        ecc_durations = [entry['ecc_duration'] for entry in self.state_history]
+        conc_durations = [entry['conc_duration'] for entry in self.state_history]
+        
+        # Create stacked bars
+        bar_width = 0.6
+        bars_ecc = self.ax_temporal.bar(rep_nums, ecc_durations, bar_width, 
+                                        label='Eccentric', color='#FF6B6B', alpha=0.8)
+        bars_conc = self.ax_temporal.bar(rep_nums, conc_durations, bar_width,
+                                         bottom=ecc_durations,
+                                         label='Concentric', color='#4ECDC4', alpha=0.8)
+        
+        # Add duration labels on bars
+        for i, (rep_num, ecc_dur, conc_dur) in enumerate(zip(rep_nums, ecc_durations, conc_durations)):
+            total = ecc_dur + conc_dur
+            # Eccentric label
+            self.ax_temporal.text(rep_num, ecc_dur/2, f'{ecc_dur:.2f}s',
+                                 ha='center', va='center', fontsize=8, fontweight='bold', color='white')
+            # Concentric label
+            self.ax_temporal.text(rep_num, ecc_dur + conc_dur/2, f'{conc_dur:.2f}s',
+                                 ha='center', va='center', fontsize=8, fontweight='bold', color='white')
+            # Total label above bar
+            self.ax_temporal.text(rep_num, total + 0.05, f'{total:.2f}s',
+                                 ha='center', va='bottom', fontsize=7, color='black')
+        
+        # Configure axes
+        if rep_nums:
+            self.ax_temporal.set_xlim(min(rep_nums) - 0.5, max(rep_nums) + 0.5)
+            self.ax_temporal.set_xticks(rep_nums)
+        
+        self.ax_temporal.legend(loc='upper right', fontsize=9)
+        self.ax_temporal.set_ylim(0, max([e+c for e, c in zip(ecc_durations, conc_durations)]) * 1.2)
+    
+    def update_temporal_windows_plot(self):
+        """Update the temporal windows bar plot showing VBT states"""
+        # Clear previous bars
+        self.ax_temporal.clear()
+        
+        # Reconfigure axes
+        self.ax_temporal.set_title("VBT State Machine (Real-Time)", fontweight='bold', color='darkgreen')
+        self.ax_temporal.set_xlabel("Rep Number")
+        self.ax_temporal.set_ylabel("Phase Duration (s)")
+        self.ax_temporal.grid(True, alpha=0.3, axis='y')
+        
+        if not self.state_history:
+            self.ax_temporal.text(0.5, 0.5, 'Waiting for first rep...', 
+                                 transform=self.ax_temporal.transAxes,
+                                 ha='center', va='center', fontsize=12, color='gray')
+            return
+        
+        # Prepare data for stacked bars
+        rep_nums = [entry['rep_num'] for entry in self.state_history]
+        ecc_durations = [entry['ecc_duration'] for entry in self.state_history]
+        conc_durations = [entry['conc_duration'] for entry in self.state_history]
+        
+        # Create stacked bars
+        bar_width = 0.6
+        bars_ecc = self.ax_temporal.bar(rep_nums, ecc_durations, bar_width, 
+                                        label='Eccentric', color='#FF6B6B', alpha=0.8)
+        bars_conc = self.ax_temporal.bar(rep_nums, conc_durations, bar_width,
+                                         bottom=ecc_durations,
+                                         label='Concentric', color='#4ECDC4', alpha=0.8)
+        
+        # Add duration labels on bars
+        for i, (rep_num, ecc_dur, conc_dur) in enumerate(zip(rep_nums, ecc_durations, conc_durations)):
+            total = ecc_dur + conc_dur
+            # Eccentric label
+            if ecc_dur > 0.1:  # Only show if duration is significant
+                self.ax_temporal.text(rep_num, ecc_dur/2, f'{ecc_dur:.2f}s',
+                                     ha='center', va='center', fontsize=8, fontweight='bold', color='white')
+            # Concentric label
+            if conc_dur > 0.1:
+                self.ax_temporal.text(rep_num, ecc_dur + conc_dur/2, f'{conc_dur:.2f}s',
+                                     ha='center', va='center', fontsize=8, fontweight='bold', color='white')
+            # Total label above bar
+            self.ax_temporal.text(rep_num, total + 0.02, f'{total:.2f}s',
+                                 ha='center', va='bottom', fontsize=7, color='black', fontweight='bold')
+        
+        # Configure axes
+        if rep_nums:
+            self.ax_temporal.set_xlim(min(rep_nums) - 0.5, max(rep_nums) + 0.5)
+            self.ax_temporal.set_xticks(rep_nums)
+        
+        self.ax_temporal.legend(loc='upper right', fontsize=9)
+        max_duration = max([e+c for e, c in zip(ecc_durations, conc_durations)]) if ecc_durations else 1.0
+        self.ax_temporal.set_ylim(0, max_duration * 1.15)
+    
     def update_statistics_display(self):
         """Update the statistics display"""
         if self.sample_count == 0:
@@ -686,6 +796,16 @@ DEVICE
         
         self.rep_count += 1
         self.last_rep_end_time = end_time
+        
+        # Save temporal window data for visualization
+        self.state_history.append({
+            'rep_num': self.rep_count,
+            'ecc_start': self.eccentric_start_time,
+            'bottom': self.bottom_time,
+            'conc_end': end_time,
+            'ecc_duration': self.last_eccentric_duration,
+            'conc_duration': self.last_concentric_duration
+        })
         
         # Instant feedback (like commercial devices)
         print(f"\n✅ REP #{self.rep_count} COMPLETED (INSTANT)")
