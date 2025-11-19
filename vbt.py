@@ -59,15 +59,26 @@ class CL837VBTMonitor:
         self.mag_std_buffer = deque(maxlen=self.STD_WINDOW)
         self.MIN_MOVEMENT_STD = 0.015  # Soglia minima STD per movimento reale
         self.MAX_NOISE_STD = 0.008  # Soglia massima STD per rumore statico
+        self.current_std = 0.0
         
-        # State Machine
-        self.vbt_state = 'REST'
-        self.eccentric_start_time = None
-        self.eccentric_start_idx = None
-        self.bottom_time = None
-        self.bottom_idx = None
-        self.concentric_start_time = None
-        self.concentric_start_idx = None
+        # Event Window System - Finestra temporale per analisi marker
+        self.WINDOW_DURATION = 3.0  # 3 secondi di registrazione dopo break baseline
+        self.window_active = False
+        self.window_start_time = None
+        self.window_start_idx = None
+        self.window_data_mag = []  # Magnitudini nella finestra
+        self.window_data_time = []  # Timestamp nella finestra
+        self.window_data_idx = []   # Indici nella finestra
+        
+        # Markers trovati nella finestra
+        self.markers = {
+            'counter_movement': None,  # Cuspide rovesciata preparazione
+            'bottom': None,             # Minimo assoluto
+            'peak': None,               # Picco massimo concentrico
+            'deceleration': None        # Minimo dopo picco (caduta)
+        }
+        
+        # Refractory period
         self.last_rep_end_time = -self.REFRACTORY_PERIOD
         
         # Baseline calibration
@@ -495,16 +506,339 @@ LAST REP:
                 self.current_velocity = self.current_velocity + mag_accel_net * dt
                 self.velocity_data.append(self.current_velocity)
                 
-                # Check state transitions (basato su magnitudine, non velocity)
-                self.check_vbt_state_transition(timestamp, len(self.magnitude_data) - 1)
+                # Check event window (sistema a finestra con marker)
+                self.check_event_window(timestamp, len(self.magnitude_data) - 1, magnitude)
             else:
                 self.velocity_data.append(0.0)
                 
         except struct.error as e:
             print(f"Unpack error: {e}")
 
-    def check_vbt_state_transition(self, current_time, current_idx):
-        """VBT state machine basato su MAGNITUDINE (pattern matching)"""
+    def open_event_window(self, current_time, current_idx):
+        """Apre finestra di 3 secondi per analisi movimento"""
+        self.window_active = True
+        self.window_start_time = current_time
+        self.window_start_idx = current_idx
+        self.window_data_mag = []
+        self.window_data_time = []
+        self.window_data_idx = []
+        self.markers = {
+            'counter_movement': None,
+            'bottom': None,
+            'peak': None,
+            'deceleration': None
+        }
+        print(f"\n🔵 EVENT WINDOW OPENED at {current_time:.2f}s (baseline break detected)")
+    
+    def close_and_analyze_window(self, current_time):
+        """Chiude finestra e analizza marker per validare squat"""
+        print(f"\n🔴 EVENT WINDOW CLOSED at {current_time:.2f}s ({len(self.window_data_mag)} samples)")
+        
+        if len(self.window_data_mag) < 30:  # Minimo 30 samples (~0.6s @ 50Hz)
+            print("⚠️  Finestra troppo corta - ignoro evento")
+            self.window_active = False
+            return
+        
+        # === FIND MARKERS ===
+        baseline = self.baseline_value
+        
+        # 1. Counter-movement (prima cuspide sotto baseline, prima del vero bottom)
+        for i in range(min(25, len(self.window_data_mag))):  # Primi 0.5s
+            if self.window_data_mag[i] < baseline * 0.92:  # Sotto 92% baseline
+                if self.markers['counter_movement'] is None:
+                    self.markers['counter_movement'] = {
+                        'idx': self.window_data_idx[i],
+                        'mag': self.window_data_mag[i],
+                        'time': self.window_data_time[i]
+                    }
+                    break
+        
+        # 2. Bottom assoluto (minimo globale)
+        min_idx = np.argmin(self.window_data_mag)
+        self.markers['bottom'] = {
+            'idx': self.window_data_idx[min_idx],
+            'mag': self.window_data_mag[min_idx],
+            'time': self.window_data_time[min_idx]
+        }
+        
+        # 3. Peak concentrico (massimo dopo bottom)
+        if min_idx < len(self.window_data_mag) - 5:  # Deve avere dati dopo bottom
+            post_bottom_mag = self.window_data_mag[min_idx:]
+            max_idx_relative = np.argmax(post_bottom_mag)
+            max_idx = min_idx + max_idx_relative
+            self.markers['peak'] = {
+                'idx': self.window_data_idx[max_idx],
+                'mag': self.window_data_mag[max_idx],
+                'time': self.window_data_time[max_idx]
+            }
+            
+            # 4. Deceleration (minimo dopo peak - effetto rimbalzo)
+            if max_idx < len(self.window_data_mag) - 5:
+                post_peak_mag = self.window_data_mag[max_idx:]
+                decel_idx_relative = np.argmin(post_peak_mag)
+                decel_idx = max_idx + decel_idx_relative
+                self.markers['deceleration'] = {
+                    'idx': self.window_data_idx[decel_idx],
+                    'mag': self.window_data_mag[decel_idx],
+                    'time': self.window_data_time[decel_idx]
+                }
+        
+        # === PRINT MARKERS ===
+        print("\n📍 MARKERS FOUND:")
+        for name, marker in self.markers.items():
+            if marker:
+                print(f"  {name:20s}: {marker['mag']:.3f}g at {marker['time']:.2f}s")
+        
+        # === VALIDATE SQUAT ===
+        is_valid = self.validate_squat_from_markers()
+        
+        if is_valid:
+            self.finalize_rep_from_markers()
+        else:
+            print("❌ Pattern non valido - NON è uno squat")
+        
+        self.window_active = False
+    
+    def validate_squat_from_markers(self):
+        """Valida che i marker formino un pattern squat valido"""
+        bottom = self.markers['bottom']
+        peak = self.markers['peak']
+        
+        if not bottom or not peak:
+            print("⚠️  Marker mancanti (bottom o peak)")
+            return False
+        
+        # 1. Bottom deve essere sufficientemente profondo
+        if bottom['mag'] >= self.MIN_DEPTH_MAG:
+            print(f"⚠️  Bottom troppo alto: {bottom['mag']:.3f}g >= {self.MIN_DEPTH_MAG}g")
+            return False
+        
+        # 2. Peak deve essere sufficientemente alto
+        if peak['mag'] <= self.MIN_PEAK_MAG:
+            print(f"⚠️  Peak troppo basso: {peak['mag']:.3f}g <= {self.MIN_PEAK_MAG}g")
+            return False
+        
+        # 3. Peak deve venire DOPO bottom (ordine temporale)
+        if peak['time'] <= bottom['time']:
+            print(f"⚠️  Ordine temporale errato: peak prima di bottom")
+            return False
+        
+        # 4. Calcola slopes (pendenze)
+        time_eccentric = bottom['time'] - self.window_start_time
+        time_concentric = peak['time'] - bottom['time']
+        
+        if time_eccentric < 0.2 or time_concentric < 0.15:
+            print(f"⚠️  Durate troppo brevi: ecc={time_eccentric:.2f}s conc={time_concentric:.2f}s")
+            return False
+        
+        slope_eccentric = (bottom['mag'] - self.baseline_value) / time_eccentric  # negativo
+        slope_concentric = (peak['mag'] - bottom['mag']) / time_concentric  # positivo
+        
+        # 5. Slope ratio: concentric deve essere più esplosivo
+        if abs(slope_eccentric) < 0.01:
+            return False
+        
+        slope_ratio = abs(slope_concentric / slope_eccentric)
+        
+        if slope_ratio < 2.0:
+            print(f"⚠️  Slope ratio basso: {slope_ratio:.2f} < 2.0 (discesa troppo veloce)")
+            return False
+        
+        print(f"✅ SQUAT VALIDO: bottom={bottom['mag']:.3f}g, peak={peak['mag']:.3f}g, ratio={slope_ratio:.2f}")
+        return True
+    
+    def finalize_rep_from_markers(self):
+        """Finalizza rep usando marker invece di state machine"""
+        bottom = self.markers['bottom']
+        peak = self.markers['peak']
+        
+        # Calcola velocità media dall'integrazione tra bottom e peak
+        bottom_idx_relative = bottom['idx'] - self.window_start_idx
+        peak_idx_relative = peak['idx'] - self.window_start_idx
+        
+        # Semplificato: usa ROM e tempo per stima velocità
+        time_concentric = peak['time'] - bottom['time']
+        delta_mag = peak['mag'] - bottom['mag']
+        mean_velocity = abs(delta_mag * 9.81 * time_concentric / 2)  # Stima semplificata
+        
+        # Store rep
+        self.rep_count += 1
+        self.rep_numbers.append(self.rep_count)
+        self.rep_velocities.append(mean_velocity)
+        
+        self.last_mean_velocity = mean_velocity
+        self.last_peak_velocity = mean_velocity * 1.3  # Stima
+        self.last_mpv = mean_velocity * 1.15
+        
+        self.last_rep_end_time = peak['time']
+        
+        # Beep
+        threading.Thread(target=lambda: winsound.Beep(1000, 200), daemon=True).start()
+        
+        print(f"\n🎯 REP #{self.rep_count} COMPLETED - MV: {mean_velocity:.3f} m/s\n")
+    
+    def open_event_window(self, current_time, current_idx):
+        """Apre finestra di 3 secondi per analisi movimento"""
+        self.window_active = True
+        self.window_start_time = current_time
+        self.window_start_idx = current_idx
+        self.window_data_mag = []
+        self.window_data_time = []
+        self.window_data_idx = []
+        self.markers = {
+            'counter_movement': None,
+            'bottom': None,
+            'peak': None,
+            'deceleration': None
+        }
+        print(f"\n🔵 EVENT WINDOW OPENED at {current_time:.2f}s (baseline break detected)")
+    
+    def close_and_analyze_window(self, current_time):
+        """Chiude finestra e analizza marker per validare squat"""
+        print(f"\n🔴 EVENT WINDOW CLOSED at {current_time:.2f}s ({len(self.window_data_mag)} samples)")
+        
+        if len(self.window_data_mag) < 30:  # Minimo 30 samples (~0.6s @ 50Hz)
+            print("⚠️  Finestra troppo corta - ignoro evento")
+            self.window_active = False
+            return
+        
+        # === FIND MARKERS ===
+        baseline = self.baseline_value
+        
+        # 1. Counter-movement (prima cuspide sotto baseline, prima del vero bottom)
+        for i in range(min(25, len(self.window_data_mag))):  # Primi 0.5s
+            if self.window_data_mag[i] < baseline * 0.92:  # Sotto 92% baseline
+                if self.markers['counter_movement'] is None:
+                    self.markers['counter_movement'] = {
+                        'idx': self.window_data_idx[i],
+                        'mag': self.window_data_mag[i],
+                        'time': self.window_data_time[i]
+                    }
+                    break
+        
+        # 2. Bottom assoluto (minimo globale)
+        min_idx = np.argmin(self.window_data_mag)
+        self.markers['bottom'] = {
+            'idx': self.window_data_idx[min_idx],
+            'mag': self.window_data_mag[min_idx],
+            'time': self.window_data_time[min_idx]
+        }
+        
+        # 3. Peak concentrico (massimo dopo bottom)
+        if min_idx < len(self.window_data_mag) - 5:  # Deve avere dati dopo bottom
+            post_bottom_mag = self.window_data_mag[min_idx:]
+            max_idx_relative = np.argmax(post_bottom_mag)
+            max_idx = min_idx + max_idx_relative
+            self.markers['peak'] = {
+                'idx': self.window_data_idx[max_idx],
+                'mag': self.window_data_mag[max_idx],
+                'time': self.window_data_time[max_idx]
+            }
+            
+            # 4. Deceleration (minimo dopo peak - effetto rimbalzo)
+            if max_idx < len(self.window_data_mag) - 5:
+                post_peak_mag = self.window_data_mag[max_idx:max_idx+25]  # Cerca nei prossimi 0.5s
+                if len(post_peak_mag) > 0:
+                    decel_idx_relative = np.argmin(post_peak_mag)
+                    decel_idx = max_idx + decel_idx_relative
+                    self.markers['deceleration'] = {
+                        'idx': self.window_data_idx[decel_idx],
+                        'mag': self.window_data_mag[decel_idx],
+                        'time': self.window_data_time[decel_idx]
+                    }
+        
+        # === PRINT MARKERS ===
+        print("\n📍 MARKERS FOUND:")
+        for name, marker in self.markers.items():
+            if marker:
+                print(f"  {name:20s}: {marker['mag']:.3f}g at {marker['time']:.2f}s")
+        
+        # === VALIDATE SQUAT ===
+        is_valid = self.validate_squat_from_markers()
+        
+        if is_valid:
+            self.finalize_rep_from_markers()
+        else:
+            print("❌ Pattern non valido - NON è uno squat")
+        
+        self.window_active = False
+    
+    def validate_squat_from_markers(self):
+        """Valida che i marker formino un pattern squat valido"""
+        bottom = self.markers['bottom']
+        peak = self.markers['peak']
+        
+        if not bottom or not peak:
+            print("⚠️  Marker mancanti (bottom o peak)")
+            return False
+        
+        # 1. Bottom deve essere sufficientemente profondo
+        if bottom['mag'] >= self.MIN_DEPTH_MAG:
+            print(f"⚠️  Bottom troppo alto: {bottom['mag']:.3f}g >= {self.MIN_DEPTH_MAG}g")
+            return False
+        
+        # 2. Peak deve essere sufficientemente alto
+        if peak['mag'] <= self.MIN_PEAK_MAG:
+            print(f"⚠️  Peak troppo basso: {peak['mag']:.3f}g <= {self.MIN_PEAK_MAG}g")
+            return False
+        
+        # 3. Peak deve venire DOPO bottom (ordine temporale)
+        if peak['time'] <= bottom['time']:
+            print(f"⚠️  Ordine temporale errato: peak prima di bottom")
+            return False
+        
+        # 4. Calcola durate e slopes
+        time_eccentric = bottom['time'] - self.window_start_time
+        time_concentric = peak['time'] - bottom['time']
+        
+        if time_eccentric < 0.2 or time_concentric < 0.15:
+            print(f"⚠️  Durate troppo brevi: ecc={time_eccentric:.2f}s conc={time_concentric:.2f}s")
+            return False
+        
+        slope_eccentric = (bottom['mag'] - self.baseline_value) / time_eccentric  # negativo
+        slope_concentric = (peak['mag'] - bottom['mag']) / time_concentric  # positivo
+        
+        # 5. Slope ratio: concentric deve essere più esplosivo
+        if abs(slope_eccentric) < 0.01:
+            return False
+        
+        slope_ratio = abs(slope_concentric / slope_eccentric)
+        
+        if slope_ratio < 2.0:
+            print(f"⚠️  Slope ratio basso: {slope_ratio:.2f} < 2.0 (discesa troppo veloce)")
+            return False
+        
+        print(f"✅ SQUAT VALIDO: bottom={bottom['mag']:.3f}g, peak={peak['mag']:.3f}g, ratio={slope_ratio:.2f}")
+        return True
+    
+    def finalize_rep_from_markers(self):
+        """Finalizza rep usando marker invece di state machine"""
+        bottom = self.markers['bottom']
+        peak = self.markers['peak']
+        
+        # Calcola velocità media dall'integrazione tra bottom e peak
+        time_concentric = peak['time'] - bottom['time']
+        delta_mag = peak['mag'] - bottom['mag']
+        mean_velocity = abs(delta_mag * 9.81 * time_concentric / 2)  # Stima semplificata
+        
+        # Store rep
+        self.rep_count += 1
+        self.rep_numbers.append(self.rep_count)
+        self.rep_velocities.append(mean_velocity)
+        
+        self.last_mean_velocity = mean_velocity
+        self.last_peak_velocity = mean_velocity * 1.3  # Stima
+        self.last_mpv = mean_velocity * 1.15
+        
+        self.last_rep_end_time = peak['time']
+        
+        # Beep
+        threading.Thread(target=lambda: winsound.Beep(1000, 200), daemon=True).start()
+        
+        print(f"\n🎯 REP #{self.rep_count} COMPLETED - MV: {mean_velocity:.3f} m/s\n")
+
+    def check_event_window(self, current_time, current_idx, magnitude):
+        """Sistema a finestra evento per rilevare squat"""
         if not self.baseline_calculated:
             return
         
@@ -515,10 +849,34 @@ LAST REP:
         mag_smooth = sum(self.mag_smooth_buffer) / len(self.mag_smooth_buffer)
         
         # Soglie baseline
-        baseline_upper = self.baseline_value * (1 + self.BASELINE_ZONE)
         baseline_lower = self.baseline_value * (1 - self.BASELINE_ZONE)
         
-        # STATE MACHINE BASATO SU MAGNITUDINE + STD
+        # === WINDOW MANAGEMENT ===
+        
+        # Apri finestra se baseline break + refractory rispettato + STD movimento
+        if not self.window_active:
+            if mag_smooth < baseline_lower:
+                if (current_time - self.last_rep_end_time) >= self.REFRACTORY_PERIOD:
+                    if self.current_std >= self.MIN_MOVEMENT_STD:
+                        self.open_event_window(current_time, current_idx)
+            return  # Non fare altro se finestra non attiva
+        
+        # Finestra attiva: accumula dati
+        if self.window_active:
+            self.window_data_mag.append(magnitude)
+            self.window_data_time.append(current_time)
+            self.window_data_idx.append(current_idx)
+            
+            # Chiudi finestra dopo 3 secondi
+            window_duration = current_time - self.window_start_time
+            if window_duration >= self.WINDOW_DURATION:
+                self.close_and_analyze_window(current_time)
+        
+        # Nota: analisi marker avviene in close_and_analyze_window()
+        return
+
+    def old_check_vbt_state_transition_DISABLED(self, current_time, current_idx):
+        """VECCHIA STATE MACHINE - DISABILITATA"""
         if self.vbt_state == 'REST':
             # Inizia ECCENTRIC quando scende sotto baseline E c'è movimento reale (STD)
             if mag_smooth < baseline_lower:
@@ -560,7 +918,10 @@ LAST REP:
                             self.concentric_start_idx = min_idx
                             self.current_velocity = 0.0  # Reset at bottom
                             self.concentric_peak_mag = 0.0  # Traccia picco concentrico
-                            print(f"🔄 BOTTOM DETECTED (mag={min_mag:.3f}g) → CONCENTRIC START")
+                            
+                            # Calcola slope eccentric per template matching
+                            self.eccentric_slope = self.calculate_slope(self.eccentric_start_idx, min_idx)
+                            print(f"🔄 BOTTOM DETECTED (mag={min_mag:.3f}g, ecc_slope={self.eccentric_slope:.3f}g/s) → CONCENTRIC")
                         else:
                             print(f"⚠️  Depth insufficiente: {min_mag:.3f}g >= {self.MIN_DEPTH_MAG}g")
                             self.vbt_state = 'REST'
@@ -575,13 +936,22 @@ LAST REP:
             # Fine CONCENTRIC quando ritorna in zona baseline E si stabilizza (bassa STD)
             if baseline_lower <= mag_smooth <= baseline_upper:
                 if concentric_duration >= self.MIN_CONCENTRIC_DURATION:
-                    # VALIDAZIONE FINALE: picco + stabilizzazione
+                    # VALIDAZIONE FINALE: picco + stabilizzazione + template matching
                     if self.concentric_peak_mag >= self.MIN_PEAK_MAG:
                         # Verifica stabilizzazione (STD bassa = fermo)
                         if self.current_std <= self.MAX_NOISE_STD * 1.5:  # Tolleranza 1.5x
-                            print(f"✅ CONCENTRIC END (peak={self.concentric_peak_mag:.3f}g, STD={self.current_std:.4f}g ✓)")
-                            self.finalize_rep(current_time, current_idx)
-                            self.vbt_state = 'REST'
+                            # Calcola slope concentric per template matching
+                            self.concentric_slope = self.calculate_slope(self.concentric_start_idx, current_idx)
+                            
+                            # TEMPLATE MATCHING: valida che sia davvero uno squat
+                            if self.validate_squat_template():
+                                print(f"✅ SQUAT VALID (peak={self.concentric_peak_mag:.3f}g, slopes: ecc={self.eccentric_slope:.2f} conc={self.concentric_slope:.2f})")
+                                self.finalize_rep(current_time, current_idx)
+                                self.vbt_state = 'REST'
+                            else:
+                                print(f"❌ Template validation failed - NOT a squat pattern")
+                                self.vbt_state = 'REST'
+                                self.current_velocity = 0.0
                         # else: attende stabilizzazione completa
                     else:
                         print(f"⚠️  Picco insufficiente: {self.concentric_peak_mag:.3f}g < {self.MIN_PEAK_MAG}g - FALSO POSITIVO")
