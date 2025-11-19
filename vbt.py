@@ -18,27 +18,6 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from bleak import BleakClient, BleakScanner
 
-class KalmanFilter1D:
-    """Kalman Filter 1D semplice per ridurre rumore magnitudine"""
-    def __init__(self, process_variance=1e-5, measurement_variance=1e-2, initial_value=1.0):
-        self.process_variance = process_variance  # Q - quanto cambia il sistema
-        self.measurement_variance = measurement_variance  # R - quanto è rumoroso il sensore
-        self.estimate = initial_value  # Stima corrente
-        self.error_covariance = 1.0  # P - incertezza stima
-    
-    def update(self, measurement):
-        """Aggiorna filtro con nuova misura"""
-        # Prediction
-        predicted_estimate = self.estimate
-        predicted_error_covariance = self.error_covariance + self.process_variance
-        
-        # Update
-        kalman_gain = predicted_error_covariance / (predicted_error_covariance + self.measurement_variance)
-        self.estimate = predicted_estimate + kalman_gain * (measurement - predicted_estimate)
-        self.error_covariance = (1 - kalman_gain) * predicted_error_covariance
-        
-        return self.estimate
-
 class CL837VBTMonitor:
     """Minimalist VBT monitor with Output Sports style bar chart"""
     
@@ -75,8 +54,11 @@ class CL837VBTMonitor:
         self.MAG_SMOOTH_WINDOW = 5  # Smoothing magnitudine
         self.mag_smooth_buffer = deque(maxlen=self.MAG_SMOOTH_WINDOW)
         
-        # Kalman Filter per magnitudine (riduce rumore e drift)
-        self.kalman_mag = None  # Inizializzato dopo baseline
+        # Variance/STD analysis per distinguere movimento da rumore
+        self.STD_WINDOW = 20  # Finestra per calcolo STD (~400ms @ 50Hz)
+        self.mag_std_buffer = deque(maxlen=self.STD_WINDOW)
+        self.MIN_MOVEMENT_STD = 0.015  # Soglia minima STD per movimento reale
+        self.MAX_NOISE_STD = 0.008  # Soglia massima STD per rumore statico
         
         # State Machine
         self.vbt_state = 'REST'
@@ -338,8 +320,8 @@ class CL837VBTMonitor:
             vel_list = list(self.velocity_data)
             indices = list(range(len(mag_list)))
             
-            # Plot magnitude (filtrata da Kalman)
-            self.ax_scope.plot(indices, mag_list, 'purple', linewidth=2.5, alpha=0.9, label='Magnitude (Kalman)')
+            # Plot magnitude
+            self.ax_scope.plot(indices, mag_list, 'purple', linewidth=2.5, alpha=0.9, label='Magnitude')
             
             # Reference lines
             self.ax_scope.axhline(y=1.0, color='blue', linestyle='--', linewidth=1.5, alpha=0.5, label='Baseline (1g)')
@@ -378,7 +360,16 @@ class CL837VBTMonitor:
             state_color = {'REST': 'gray', 'ECCENTRIC': 'red', 'CONCENTRIC': 'green'}.get(self.vbt_state, 'black')
             current_vel = vel_list[-1] if vel_list else 0.0
             current_mag = mag_list[-1] if mag_list else 0.0
-            info_text = f"State: {self.vbt_state} | Mag: {current_mag:.3f}g (Kalman) | Vel: {current_vel:.3f} m/s"
+            
+            # Indicatore movimento basato su STD
+            if self.current_std >= self.MIN_MOVEMENT_STD:
+                movement_indicator = "🔴 MOVING"
+            elif self.current_std <= self.MAX_NOISE_STD:
+                movement_indicator = "🟢 STABLE"
+            else:
+                movement_indicator = "🟡 TRANSITION"
+            
+            info_text = f"State: {self.vbt_state} | Mag: {current_mag:.3f}g | Vel: {current_vel:.3f} m/s\nSTD: {self.current_std:.4f}g {movement_indicator}"
             self.ax_scope.text(0.02, 0.98, info_text, transform=self.ax_scope.transAxes,
                               fontsize=10, verticalalignment='top', fontweight='bold',
                               color=state_color,
@@ -474,16 +465,17 @@ LAST REP:
             self.sample_count += 1
             timestamp = frame_time
             
-            # Applica Kalman filter se disponibile
-            if self.kalman_mag is not None:
-                magnitude_filtered = self.kalman_mag.update(magnitude)
-            else:
-                magnitude_filtered = magnitude
-            
-            # Store data (usa magnitudine filtrata)
-            self.magnitude_data.append(magnitude_filtered)
+            # Store data
+            self.magnitude_data.append(magnitude)
             self.timestamps_data.append(timestamp)
-            self.mag_smooth_buffer.append(magnitude_filtered)  # Per smoothing state machine
+            self.mag_smooth_buffer.append(magnitude)  # Per smoothing state machine
+            self.mag_std_buffer.append(magnitude)  # Per calcolo STD
+            
+            # Calcola STD corrente (variabilità movimento)
+            if len(self.mag_std_buffer) >= 10:
+                self.current_std = np.std(list(self.mag_std_buffer))
+            else:
+                self.current_std = 0.0
             
             # Baseline calibration (first 25 samples after countdown)
             if not self.baseline_calculated and not self.countdown_active:
@@ -491,22 +483,15 @@ LAST REP:
                 if len(self.baseline_samples) >= self.BASELINE_SAMPLES_COUNT:
                     self.baseline_value = np.median(self.baseline_samples)
                     self.baseline_calculated = True
-                    # Inizializza Kalman con baseline
-                    self.kalman_mag = KalmanFilter1D(
-                        process_variance=1e-5,  # Bassa varianza processo (movimento smooth)
-                        measurement_variance=5e-3,  # Varianza sensore (rumore CL837)
-                        initial_value=self.baseline_value
-                    )
                     print(f"\n✅ BASELINE CALIBRATED: {self.baseline_value:.3f}g")
-                    print("🟢 VBT MONITORING ACTIVE (Kalman Filter enabled)\n")
+                    print("🟢 VBT MONITORING ACTIVE (STD-based detection)\n")
                 return
             
             # Real-time velocity integration (FIXED 1.0g gravity compensation)
             if self.baseline_calculated and len(self.timestamps_data) >= 2:
                 dt = self.timestamps_data[-1] - self.timestamps_data[-2]
                 # GRAVITY COMPENSATION - Fixed 1.0g (Vitruve/Beast/Enode standard)
-                # USA magnitudine filtrata da Kalman
-                mag_accel_net = (magnitude_filtered - 1.0) * 9.81  # m/s²
+                mag_accel_net = (magnitude - 1.0) * 9.81  # m/s²
                 self.current_velocity = self.current_velocity + mag_accel_net * dt
                 self.velocity_data.append(self.current_velocity)
                 
@@ -533,17 +518,22 @@ LAST REP:
         baseline_upper = self.baseline_value * (1 + self.BASELINE_ZONE)
         baseline_lower = self.baseline_value * (1 - self.BASELINE_ZONE)
         
-        # STATE MACHINE BASATO SU MAGNITUDINE
+        # STATE MACHINE BASATO SU MAGNITUDINE + STD
         if self.vbt_state == 'REST':
-            # Inizia ECCENTRIC quando scende sotto baseline
+            # Inizia ECCENTRIC quando scende sotto baseline E c'è movimento reale (STD)
             if mag_smooth < baseline_lower:
                 if (current_time - self.last_rep_end_time) >= self.REFRACTORY_PERIOD:
-                    self.vbt_state = 'ECCENTRIC'
-                    self.eccentric_start_time = current_time
-                    self.eccentric_start_idx = current_idx
-                    self.bottom_time = None
-                    self.bottom_idx = None
-                    print(f"⬇️  ECCENTRIC START (mag={mag_smooth:.3f}g < {baseline_lower:.3f}g)")
+                    # VALIDAZIONE STD: deve esserci movimento, non solo rumore
+                    if self.current_std >= self.MIN_MOVEMENT_STD:
+                        self.vbt_state = 'ECCENTRIC'
+                        self.eccentric_start_time = current_time
+                        self.eccentric_start_idx = current_idx
+                        self.bottom_time = None
+                        self.bottom_idx = None
+                        print(f"⬇️  ECCENTRIC START (mag={mag_smooth:.3f}g, STD={self.current_std:.4f}g ✓)")
+                    else:
+                        # STD troppo bassa = solo rumore, non movimento
+                        pass  # Ignora silenziosamente
         
         elif self.vbt_state == 'ECCENTRIC':
             # Rileva BOTTOM quando magnitudine risale verso baseline
@@ -582,14 +572,17 @@ LAST REP:
             if mag_smooth > self.concentric_peak_mag:
                 self.concentric_peak_mag = mag_smooth
             
-            # Fine CONCENTRIC quando ritorna in zona baseline
+            # Fine CONCENTRIC quando ritorna in zona baseline E si stabilizza (bassa STD)
             if baseline_lower <= mag_smooth <= baseline_upper:
                 if concentric_duration >= self.MIN_CONCENTRIC_DURATION:
-                    # VALIDAZIONE FINALE: deve aver superato MIN_PEAK_MAG
+                    # VALIDAZIONE FINALE: picco + stabilizzazione
                     if self.concentric_peak_mag >= self.MIN_PEAK_MAG:
-                        print(f"✅ CONCENTRIC END (mag={mag_smooth:.3f}g, peak={self.concentric_peak_mag:.3f}g)")
-                        self.finalize_rep(current_time, current_idx)
-                        self.vbt_state = 'REST'
+                        # Verifica stabilizzazione (STD bassa = fermo)
+                        if self.current_std <= self.MAX_NOISE_STD * 1.5:  # Tolleranza 1.5x
+                            print(f"✅ CONCENTRIC END (peak={self.concentric_peak_mag:.3f}g, STD={self.current_std:.4f}g ✓)")
+                            self.finalize_rep(current_time, current_idx)
+                            self.vbt_state = 'REST'
+                        # else: attende stabilizzazione completa
                     else:
                         print(f"⚠️  Picco insufficiente: {self.concentric_peak_mag:.3f}g < {self.MIN_PEAK_MAG}g - FALSO POSITIVO")
                         self.vbt_state = 'REST'
