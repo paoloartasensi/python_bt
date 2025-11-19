@@ -44,12 +44,12 @@ class CL837VBTMonitor:
         
         # VBT State Machine - BASATO SU MAGNITUDINE (più affidabile)
         self.BASELINE_ZONE = 0.06  # ±6% dalla baseline = zona REST (più stretta)
-        self.MIN_DEPTH_MAG = 0.85  # Deve scendere sotto 0.85g per validare squat (più profondo)
+        self.MIN_DEPTH_MAG = 0.60  # Deve scendere sotto 0.60g per validare squat (range VBT completo)
         self.MIN_PEAK_MAG = 1.05  # Picco concentrico deve superare 1.05g (accelerazione reale)
         
-        self.MIN_ECCENTRIC_WINDOW = 0.30  # s - minimo 300ms discesa (più lungo)
+        self.MIN_ECCENTRIC_WINDOW = 0.30  # s - minimo 300ms discesa (controllo)
         self.MAX_CONCENTRIC_WINDOW = 2.5  # s - massimo 2.5s spinta
-        self.MIN_CONCENTRIC_DURATION = 0.25  # s - minimo 250ms spinta (più lungo)
+        self.MIN_CONCENTRIC_DURATION = 0.15  # s - minimo 150ms spinta (range VBT esplosivo)
         self.REFRACTORY_PERIOD = 0.8  # s - pausa tra rep (più lungo)
         
         self.MAG_SMOOTH_WINDOW = 5  # Smoothing magnitudine
@@ -533,7 +533,7 @@ LAST REP:
         # === FIND MARKERS ===
         baseline = self.baseline_value
         
-        # 1. Counter-movement (prima cuspide sotto baseline, prima del vero bottom)
+        # 1. Counter-movement (GIALLO - apertura finestra, prima cuspide sotto baseline)
         for i in range(min(25, len(self.window_data_mag))):  # Primi 0.5s
             if self.window_data_mag[i] < baseline * 0.92:  # Sotto 92% baseline
                 if self.markers['counter_movement'] is None:
@@ -544,35 +544,45 @@ LAST REP:
                     }
                     break
         
-        # 2. Bottom assoluto (minimo globale)
-        min_idx = np.argmin(self.window_data_mag)
-        self.markers['bottom'] = {
-            'idx': self.window_data_idx[min_idx],
-            'mag': self.window_data_mag[min_idx],
-            'time': self.window_data_time[min_idx]
+        # 2. Picco spinta concentrica (BLU - massimo assoluto = accelerazione spinta)
+        max_global_idx = np.argmax(self.window_data_mag)
+        self.markers['peak'] = {
+            'idx': self.window_data_idx[max_global_idx],
+            'mag': self.window_data_mag[max_global_idx],
+            'time': self.window_data_time[max_global_idx]
         }
         
-        # 3. Peak concentrico (massimo dopo bottom)
-        if min_idx < len(self.window_data_mag) - 5:  # Deve avere dati dopo bottom
-            post_bottom_mag = self.window_data_mag[min_idx:]
-            max_idx_relative = np.argmax(post_bottom_mag)
-            max_idx = min_idx + max_idx_relative
-            self.markers['peak'] = {
-                'idx': self.window_data_idx[max_idx],
-                'mag': self.window_data_mag[max_idx],
-                'time': self.window_data_time[max_idx]
+        # 3. Rinculo accelerometro (ROSSO - minimo dopo il picco blu)
+        post_peak_start = max_global_idx + 1
+        if post_peak_start < len(self.window_data_mag):
+            post_peak_mag = self.window_data_mag[post_peak_start:]
+            min_idx_relative = np.argmin(post_peak_mag)
+            min_idx = post_peak_start + min_idx_relative
+            self.markers['bottom'] = {
+                'idx': self.window_data_idx[min_idx],
+                'mag': self.window_data_mag[min_idx],
+                'time': self.window_data_time[min_idx]
             }
             
-            # 4. Deceleration (minimo dopo peak - effetto rimbalzo)
-            if max_idx < len(self.window_data_mag) - 5:
-                post_peak_mag = self.window_data_mag[max_idx:]
-                decel_idx_relative = np.argmin(post_peak_mag)
-                decel_idx = max_idx + decel_idx_relative
+            # 4. Ritorno baseline (VERDE - risalita verso baseline dopo rinculo)
+            post_recoil_start = min_idx + 1
+            if post_recoil_start < len(self.window_data_mag) - 5:
+                post_recoil_mag = self.window_data_mag[post_recoil_start:]
+                green_idx_relative = np.argmax(post_recoil_mag)
+                green_idx = post_recoil_start + green_idx_relative
                 self.markers['deceleration'] = {
-                    'idx': self.window_data_idx[decel_idx],
-                    'mag': self.window_data_mag[decel_idx],
-                    'time': self.window_data_time[decel_idx]
+                    'idx': self.window_data_idx[green_idx],
+                    'mag': self.window_data_mag[green_idx],
+                    'time': self.window_data_time[green_idx]
                 }
+        else:
+            # Fallback se non c'è abbastanza dati dopo il picco
+            min_idx = np.argmin(self.window_data_mag)
+            self.markers['bottom'] = {
+                'idx': self.window_data_idx[min_idx],
+                'mag': self.window_data_mag[min_idx],
+                'time': self.window_data_time[min_idx]
+            }
         
         # === PRINT MARKERS ===
         print("\n📍 MARKERS FOUND:")
@@ -596,6 +606,13 @@ LAST REP:
     def save_window_screenshot(self, is_valid):
         """Salva screenshot finestra con marker"""
         try:
+            import os
+            
+            # Crea folder windowshots se non esiste
+            screenshot_dir = "windowshots"
+            if not os.path.exists(screenshot_dir):
+                os.makedirs(screenshot_dir)
+            
             fig_s = plt.figure(figsize=(14, 6))
             ax_s = fig_s.add_subplot(111)
             times_rel = [(t - self.window_start_time) for t in self.window_data_time]
@@ -603,7 +620,7 @@ LAST REP:
             ax_s.axhline(y=self.baseline_value, color='blue', linestyle='--', linewidth=1.5)
             ax_s.axhline(y=self.MIN_DEPTH_MAG, color='orange', linestyle='--', linewidth=1, alpha=0.6)
             ax_s.axhline(y=self.MIN_PEAK_MAG, color='cyan', linestyle='--', linewidth=1, alpha=0.6)
-            colors = {'counter_movement': 'yellow', 'bottom': 'red', 'peak': 'green', 'deceleration': 'orange'}
+            colors = {'counter_movement': 'yellow', 'peak': 'blue', 'bottom': 'red', 'deceleration': 'green'}
             for name, m in self.markers.items():
                 if m:
                     t = m['time'] - self.window_start_time
@@ -616,7 +633,7 @@ LAST REP:
             ax_s.set_ylim(0, 2.0)
             ax_s.grid(True, alpha=0.3)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            fname = f"window_{ts}_{status}.png"
+            fname = os.path.join(screenshot_dir, f"window_{ts}_{status}.png")
             fig_s.savefig(fname, dpi=150, bbox_inches='tight')
             plt.close(fig_s)
             print(f"📸 {fname}")
@@ -625,225 +642,51 @@ LAST REP:
     
     def validate_squat_from_markers(self):
         """Valida che i marker formino un pattern squat valido"""
-        bottom = self.markers['bottom']
-        peak = self.markers['peak']
+        peak = self.markers['peak']  # BLU - picco spinta concentrica
+        recoil = self.markers['bottom']  # ROSSO - rinculo accelerometro
         
-        if not bottom or not peak:
-            print("⚠️  Marker mancanti (bottom o peak)")
+        if not peak:
+            print("⚠️  Picco mancante")
             return False
         
-        # 1. Bottom deve essere sufficientemente profondo
-        if bottom['mag'] >= self.MIN_DEPTH_MAG:
-            print(f"⚠️  Bottom troppo alto: {bottom['mag']:.3f}g >= {self.MIN_DEPTH_MAG}g")
-            return False
-        
-        # 2. Peak deve essere sufficientemente alto
+        # 1. Picco spinta deve essere sufficientemente alto
         if peak['mag'] <= self.MIN_PEAK_MAG:
-            print(f"⚠️  Peak troppo basso: {peak['mag']:.3f}g <= {self.MIN_PEAK_MAG}g")
+            print(f"⚠️  Picco troppo basso: {peak['mag']:.3f}g <= {self.MIN_PEAK_MAG}g")
             return False
         
-        # 3. Peak deve venire DOPO bottom (ordine temporale)
-        if peak['time'] <= bottom['time']:
-            print(f"⚠️  Ordine temporale errato: peak prima di bottom")
+        # 2. Deve esserci rinculo dopo il picco
+        if not recoil:
+            print(f"⚠️  Rinculo mancante")
             return False
         
-        # 4. Calcola slopes (pendenze)
-        time_eccentric = bottom['time'] - self.window_start_time
-        time_concentric = peak['time'] - bottom['time']
-        
-        if time_eccentric < 0.2 or time_concentric < 0.15:
-            print(f"⚠️  Durate troppo brevi: ecc={time_eccentric:.2f}s conc={time_concentric:.2f}s")
+        # 3. Rinculo deve essere DOPO il picco (ordine temporale corretto)
+        if recoil['time'] <= peak['time']:
+            print(f"⚠️  Ordine errato: rinculo prima del picco")
             return False
         
-        slope_eccentric = (bottom['mag'] - self.baseline_value) / time_eccentric  # negativo
-        slope_concentric = (peak['mag'] - bottom['mag']) / time_concentric  # positivo
+        # 4. Calcola durata fase concentrica (inizio finestra -> picco)
+        time_to_peak = peak['time'] - self.window_start_time
         
-        # 5. Slope ratio: concentric deve essere più esplosivo
-        if abs(slope_eccentric) < 0.01:
+        # VALIDAZIONE DURATION: range VBT completo (da esplosivo a controllato)
+        if time_to_peak < self.MIN_CONCENTRIC_DURATION:
+            print(f"⚠️  Movimento troppo rapido: {time_to_peak:.2f}s < {self.MIN_CONCENTRIC_DURATION}s")
             return False
         
-        slope_ratio = abs(slope_concentric / slope_eccentric)
+        # 5. Calcola velocità media: delta magnitudine / tempo
+        delta_mag = peak['mag'] - self.baseline_value
+        mean_velocity = abs(delta_mag * 9.81 * time_to_peak / 2)
         
-        if slope_ratio < 2.0:
-            print(f"⚠️  Slope ratio basso: {slope_ratio:.2f} < 2.0 (discesa troppo veloce)")
-            return False
-        
-        print(f"✅ SQUAT VALIDO: bottom={bottom['mag']:.3f}g, peak={peak['mag']:.3f}g, ratio={slope_ratio:.2f}")
+        print(f"✅ SQUAT VALIDO: picco={peak['mag']:.3f}g, rinculo={recoil['mag']:.3f}g, tempo={time_to_peak:.2f}s, MV={mean_velocity:.3f}m/s")
         return True
     
     def finalize_rep_from_markers(self):
         """Finalizza rep usando marker invece di state machine"""
-        bottom = self.markers['bottom']
-        peak = self.markers['peak']
+        peak = self.markers['peak']  # BLU - picco spinta concentrica
         
-        # Calcola velocità media dall'integrazione tra bottom e peak
-        bottom_idx_relative = bottom['idx'] - self.window_start_idx
-        peak_idx_relative = peak['idx'] - self.window_start_idx
-        
-        # Semplificato: usa ROM e tempo per stima velocità
-        time_concentric = peak['time'] - bottom['time']
-        delta_mag = peak['mag'] - bottom['mag']
-        mean_velocity = abs(delta_mag * 9.81 * time_concentric / 2)  # Stima semplificata
-        
-        # Store rep
-        self.rep_count += 1
-        self.rep_numbers.append(self.rep_count)
-        self.rep_velocities.append(mean_velocity)
-        
-        self.last_mean_velocity = mean_velocity
-        self.last_peak_velocity = mean_velocity * 1.3  # Stima
-        self.last_mpv = mean_velocity * 1.15
-        
-        self.last_rep_end_time = peak['time']
-        
-        # Beep
-        threading.Thread(target=lambda: winsound.Beep(1000, 200), daemon=True).start()
-        
-        print(f"\n🎯 REP #{self.rep_count} COMPLETED - MV: {mean_velocity:.3f} m/s\n")
-    
-    def open_event_window(self, current_time, current_idx):
-        """Apre finestra di 3 secondi per analisi movimento"""
-        self.window_active = True
-        self.window_start_time = current_time
-        self.window_start_idx = current_idx
-        self.window_data_mag = []
-        self.window_data_time = []
-        self.window_data_idx = []
-        self.markers = {
-            'counter_movement': None,
-            'bottom': None,
-            'peak': None,
-            'deceleration': None
-        }
-        print(f"\n🔵 EVENT WINDOW OPENED at {current_time:.2f}s (baseline break detected)")
-    
-    def close_and_analyze_window(self, current_time):
-        """Chiude finestra e analizza marker per validare squat"""
-        print(f"\n🔴 EVENT WINDOW CLOSED at {current_time:.2f}s ({len(self.window_data_mag)} samples)")
-        
-        if len(self.window_data_mag) < 30:  # Minimo 30 samples (~0.6s @ 50Hz)
-            print("⚠️  Finestra troppo corta - ignoro evento")
-            self.window_active = False
-            return
-        
-        # === FIND MARKERS ===
-        baseline = self.baseline_value
-        
-        # 1. Counter-movement (prima cuspide sotto baseline, prima del vero bottom)
-        for i in range(min(25, len(self.window_data_mag))):  # Primi 0.5s
-            if self.window_data_mag[i] < baseline * 0.92:  # Sotto 92% baseline
-                if self.markers['counter_movement'] is None:
-                    self.markers['counter_movement'] = {
-                        'idx': self.window_data_idx[i],
-                        'mag': self.window_data_mag[i],
-                        'time': self.window_data_time[i]
-                    }
-                    break
-        
-        # 2. Bottom assoluto (minimo globale)
-        min_idx = np.argmin(self.window_data_mag)
-        self.markers['bottom'] = {
-            'idx': self.window_data_idx[min_idx],
-            'mag': self.window_data_mag[min_idx],
-            'time': self.window_data_time[min_idx]
-        }
-        
-        # 3. Peak concentrico (massimo dopo bottom)
-        if min_idx < len(self.window_data_mag) - 5:  # Deve avere dati dopo bottom
-            post_bottom_mag = self.window_data_mag[min_idx:]
-            max_idx_relative = np.argmax(post_bottom_mag)
-            max_idx = min_idx + max_idx_relative
-            self.markers['peak'] = {
-                'idx': self.window_data_idx[max_idx],
-                'mag': self.window_data_mag[max_idx],
-                'time': self.window_data_time[max_idx]
-            }
-            
-            # 4. Deceleration (minimo dopo peak - effetto rimbalzo)
-            if max_idx < len(self.window_data_mag) - 5:
-                post_peak_mag = self.window_data_mag[max_idx:max_idx+25]  # Cerca nei prossimi 0.5s
-                if len(post_peak_mag) > 0:
-                    decel_idx_relative = np.argmin(post_peak_mag)
-                    decel_idx = max_idx + decel_idx_relative
-                    self.markers['deceleration'] = {
-                        'idx': self.window_data_idx[decel_idx],
-                        'mag': self.window_data_mag[decel_idx],
-                        'time': self.window_data_time[decel_idx]
-                    }
-        
-        # === PRINT MARKERS ===
-        print("\n📍 MARKERS FOUND:")
-        for name, marker in self.markers.items():
-            if marker:
-                print(f"  {name:20s}: {marker['mag']:.3f}g at {marker['time']:.2f}s")
-        
-        # === VALIDATE SQUAT ===
-        is_valid = self.validate_squat_from_markers()
-        
-        if is_valid:
-            self.finalize_rep_from_markers()
-        else:
-            print("❌ Pattern non valido - NON è uno squat")
-        
-        self.window_active = False
-    
-    def validate_squat_from_markers(self):
-        """Valida che i marker formino un pattern squat valido"""
-        bottom = self.markers['bottom']
-        peak = self.markers['peak']
-        
-        if not bottom or not peak:
-            print("⚠️  Marker mancanti (bottom o peak)")
-            return False
-        
-        # 1. Bottom deve essere sufficientemente profondo
-        if bottom['mag'] >= self.MIN_DEPTH_MAG:
-            print(f"⚠️  Bottom troppo alto: {bottom['mag']:.3f}g >= {self.MIN_DEPTH_MAG}g")
-            return False
-        
-        # 2. Peak deve essere sufficientemente alto
-        if peak['mag'] <= self.MIN_PEAK_MAG:
-            print(f"⚠️  Peak troppo basso: {peak['mag']:.3f}g <= {self.MIN_PEAK_MAG}g")
-            return False
-        
-        # 3. Peak deve venire DOPO bottom (ordine temporale)
-        if peak['time'] <= bottom['time']:
-            print(f"⚠️  Ordine temporale errato: peak prima di bottom")
-            return False
-        
-        # 4. Calcola durate e slopes
-        time_eccentric = bottom['time'] - self.window_start_time
-        time_concentric = peak['time'] - bottom['time']
-        
-        if time_eccentric < 0.2 or time_concentric < 0.15:
-            print(f"⚠️  Durate troppo brevi: ecc={time_eccentric:.2f}s conc={time_concentric:.2f}s")
-            return False
-        
-        slope_eccentric = (bottom['mag'] - self.baseline_value) / time_eccentric  # negativo
-        slope_concentric = (peak['mag'] - bottom['mag']) / time_concentric  # positivo
-        
-        # 5. Slope ratio: concentric deve essere più esplosivo
-        if abs(slope_eccentric) < 0.01:
-            return False
-        
-        slope_ratio = abs(slope_concentric / slope_eccentric)
-        
-        if slope_ratio < 2.0:
-            print(f"⚠️  Slope ratio basso: {slope_ratio:.2f} < 2.0 (discesa troppo veloce)")
-            return False
-        
-        print(f"✅ SQUAT VALIDO: bottom={bottom['mag']:.3f}g, peak={peak['mag']:.3f}g, ratio={slope_ratio:.2f}")
-        return True
-    
-    def finalize_rep_from_markers(self):
-        """Finalizza rep usando marker invece di state machine"""
-        bottom = self.markers['bottom']
-        peak = self.markers['peak']
-        
-        # Calcola velocità media dall'integrazione tra bottom e peak
-        time_concentric = peak['time'] - bottom['time']
-        delta_mag = peak['mag'] - bottom['mag']
-        mean_velocity = abs(delta_mag * 9.81 * time_concentric / 2)  # Stima semplificata
+        # Calcola velocità media dalla spinta: baseline -> picco
+        time_to_peak = peak['time'] - self.window_start_time
+        delta_mag = peak['mag'] - self.baseline_value
+        mean_velocity = abs(delta_mag * 9.81 * time_to_peak / 2)  # Stima semplificata
         
         # Store rep
         self.rep_count += 1
