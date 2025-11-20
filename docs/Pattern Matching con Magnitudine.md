@@ -148,241 +148,1178 @@ Il **bottom** (punto più basso) è identificato come:
 
 ---
 
-## ⚙️ Implementazione Algoritmica
+## ⚙️ Implementazione Algoritmica Production-Ready
 
-### STEP 1: Preparazione del Segnale
+### 🎯 Strategia dei Marker Real-Time (Come Dispositivi Commerciali)
 
-#### 1.1 Estrazione Magnitudine dell'Accelerazione
+Questa implementazione replica esattamente il comportamento dei dispositivi VBT commerciali (Vitruve, Enode Pro, Beast, Metric VBT) con **risposta istantanea** (80-250ms) dopo fine rep.
+
+### FASE 1: Acquisizione e Calibrazione
+
+#### 1.1 Acquisizione Raw Data
 
 ```python
-# Magnitudine = norma del vettore accelerazione (orientation-independent)
-magnitude = df['Magnitude'].values  # sqrt(X² + Y² + Z²), già filtrato con Gaussian (sigma=2)
-timestamps = df['Timestamp'].values
-SAMPLING_RATE = len(timestamps) / (timestamps[-1] - timestamps[0])
+# Parsing BLE frame da sensore CL837 (Chileaf protocol)
+rawAX, rawAY, rawAZ = struct.unpack('<hhh', accel_data)  # int16 little-endian
+
+# Conversione a g-force
+ax_g = rawAX / 4096.0
+ay_g = rawAY / 4096.0
+az_g = rawAZ / 4096.0
+
+# Calcolo magnitudine (orientation-independent)
+magnitude = (ax_g**2 + ay_g**2 + az_g**2)**0.5  # sempre ≥ 0
 ```
 
 **Vantaggio della magnitudine:**
 - ✅ Indipendente dall'orientamento del sensore (X, Y, Z)
 - ✅ Sempre positiva (0 a +∞)
 - ✅ Misura l'accelerazione **totale** senza bisogno di saper quale asse è verticale
+- ✅ Funziona su polso, cintura, bilanciere, caviglia, ecc.
 
-#### 1.2 Calcolo della Baseline Gravitazionale
-
-La baseline rappresenta lo stato di riposo (accelerazione gravitazionale):
-
-```python
-# Calcola baseline dai primi campioni stabili (sensore a riposo = ~1.0g)
-baseline_samples = 30  # Primi 30 campioni
-baseline_value = np.median(magnitude[:baseline_samples])
-
-# Calcola accelerazione netta (rimuovi baseline)
-mag_accel_net = (magnitude - baseline_value) * 9.81  # m/s²
-```
-
-**Spiegazione fisica:**
-- Sensore fermo: magnitudine legge `≈1.0g` (accelerazione gravitazionale)
-- Durante movimento: `mag_misurata = sqrt((a_movimento + g)²)`
-- Sottrai baseline per ottenere accelerazione netta del movimento
-
-#### 1.3 Integrazione Numerica: Accelerazione Magnitudine → Velocità
+#### 1.2 Sequenza di Calibrazione Baseline
 
 ```python
-velocity = np.zeros(len(mag_accel_net))
-for i in range(1, len(velocity)):
-    dt = timestamps[i] - timestamps[i-1]
-    velocity[i] = velocity[i-1] + mag_accel_net[i] * dt
-```
+# SEQUENZA TEMPORALE (come dispositivi commerciali):
+# 1. Sample #1 → START COUNTDOWN (3-2-1)
+# 2. Countdown finito → START CSV RECORDING
+# 3. Durante recording → BASELINE CALIBRATION (25 samples)
+# 4. Baseline calcolata → VBT MONITORING ACTIVE
 
-**Metodo:** Integrazione di Eulero in avanti (first-order)
-- Pro: semplice, veloce, sufficiente per sampling rate > 30Hz
-- Con: accumula drift su intervalli lunghi (>10s)
-- Soluzione drift: reset automatico quando velocità rimane vicina a zero per periodo prolungato
+if self.sample_count == 1:
+    self.start_countdown()  # 3 secondi
 
-**⚠️ NOTA IMPORTANTE:**
-Poiché la magnitudine è sempre positiva, la velocità integrata **non cambia segno** come nel caso dell'accelerazione Y. Il pattern è:
-- Velocità cresce durante accelerazione (mag > baseline)
-- Velocità decresce durante decelerazione (mag < baseline)
-- Ma resta sempre nello stesso segno (non c'è zero-crossing classico)
-
-#### 1.4 Filtro Anti-Rumore
-
-```python
-from scipy.ndimage import gaussian_filter1d
-velocity_filtered = gaussian_filter1d(velocity, sigma=2)
-```
-
-**Parametro `sigma`:**
-- `sigma=1`: filtro debole, preserva dettagli (per sampling rate >100Hz)
-- `sigma=2`: ottimale per 30-100Hz, rimuove oscillazioni muscolari
-- `sigma=3`: filtro forte, utile con sensori molto rumorosi
-
-**Frequenza di taglio equivalente:** `f_cutoff ≈ sampling_rate / (2π·sigma)`
-- Con 50Hz e sigma=2: `f_cutoff ≈ 4 Hz` (perfetto per movimento umano)
-
-### STEP 2: Pattern Matching con Magnitudine
-
-#### 2.1 Stati della Magnitudine
-
-Invece di una macchina a stati sulla velocità, usiamo **transizioni sulla magnitudine**:
-
-```python
-# Stati basati su soglie magnitudine
-STATE_BASE = 0      # Magnitudine nella zona baseline (±8%)
-STATE_ABOVE = 1     # Magnitudine sopra baseline (accelerazione)
-STATE_BELOW = 2     # Magnitudine sotto baseline (decelerazione)
-
-# Soglie calcolate da baseline
-baseline_upper = baseline_value * (1 + BASELINE_ZONE)  # +8%
-baseline_lower = baseline_value * (1 - BASELINE_ZONE)  # -8%
-```
-
-#### 2.2 Pattern Matching Loop
-
-```python
-# Classifica samples in stati
-for i in range(len(magnitude)):
-    mag = magnitude[i]
+# Calibrazione SOLO dopo countdown (evita movimenti di setup)
+if not self.baseline_calculated and self.csv_recording:
+    self.baseline_samples.append(magnitude)
     
-    if mag > baseline_upper:
-        current_state = 'ABOVE'
-    elif mag < baseline_lower:
-        current_state = 'BELOW'
-    else:
-        current_state = 'BASE'
-    
-    # Traccia transizioni di stato
-    if current_state != prev_state:
-        state_changes.append({
-            'idx': i,
-            'time': timestamps[i],
-            'from': prev_state,
-            'to': current_state,
-            'mag': mag
-        })
-        prev_state = current_state
+    if len(self.baseline_samples) >= 25:  # ~0.5s @ 50Hz
+        # Media dei primi campioni stabili
+        self.baseline_value = sum(self.baseline_samples) / len(self.baseline_samples)
+        self.baseline_calculated = True
+        # Reset velocity per iniziare da zero pulito
+        self.current_velocity = 0.0
+        print(f"✅ BASELINE CALIBRATED: {self.baseline_value:.3f}g")
+```
 
-# Pattern universale: BASE → movimento → BASE
-for transition in state_changes:
-    if transition['from'] == 'BASE':
-        rep_start_idx = transition['idx']
-        rep_start_time = transition['time']
+**📊 Baseline tipica:**
+- Sensore a riposo: `0.98g - 1.02g` (varia per calibrazione sensore)
+- Media: `~1.00g` (gravità terrestre)
+- Range accettabile: `0.95g - 1.05g`
+
+#### 1.3 Integrazione Real-Time: Magnitudine → Velocità (m/s)
+
+**🔑 GRAVITY COMPENSATION - Strategia Universale**
+
+```python
+# CRITICAL: Sottrazione FISSA di 1.0g (non baseline variabile!)
+# Questo è esattamente ciò che fanno Vitruve, Beast, Enode, Metric VBT
+
+if self.baseline_calculated and len(self.timestamps_data) >= 2:
+    # Calcola dt reale tra campioni
+    dt = self.timestamps_data[-1] - self.timestamps_data[-2]
+    
+    # GRAVITY COMPENSATION: sottrai SEMPRE 1.0g fisso
+    mag_accel_net = (magnitude - 1.0) * 9.81  # m/s²
+    
+    # Integrazione di Eulero (forward)
+    self.current_velocity = self.current_velocity + mag_accel_net * dt
+    
+    # Salva velocità per plotting e state machine
+    self.velocity_data.append(self.current_velocity)
+```
+
+**⚠️ PERCHÉ 1.0g FISSO E NON BASELINE VARIABILE?**
+
+1. **Fisica Universale:** La gravità è sempre `1.0g = 9.81 m/s²` (costante naturale)
+2. **Orientation-Independence:** Con magnitudine, `1.0g` è il valore a riposo **indipendentemente** dall'orientamento
+3. **Robustezza:** Evita drift da calibrazione baseline imprecisa
+4. **Standard Industriale:** Tutti i dispositivi commerciali usano `1.0g` fisso
+5. **Semplicità:** Non serve ricalibrazione continua
+
+**📈 Dinamica della Velocità Integrata:**
+
+```
+   v(t)
+   ↑
+   │     ╱╲ ← CONCENTRIC (mag > 1.0g → v aumenta)
+   │    ╱  ╲
+   │   ╱    ╲
+ 0 ├──╯──────╰─── ← BASELINE (mag = 1.0g → v stabile)
+   │            ╲
+   │             ╲ ← ECCENTRIC (mag < 1.0g → v diminuisce, va negativa)
+   │              ╲___
+   └──────────────────→ t
+```
+
+**Nota Critica:** Con magnitudine, la velocità integrata **può diventare negativa**:
+- `mag > 1.0g` → accelerazione positiva → velocità aumenta
+- `mag < 1.0g` → accelerazione negativa → velocità diminuisce (può diventare < 0)
+- Questo permette il **zero-crossing classico**!
+
+#### 1.4 Smoothing per State Detection
+
+```python
+# Media mobile su finestra 5 campioni (50-100ms @ 50Hz)
+VEL_SMOOTH_WINDOW = 5
+self.velocity_smooth_buffer = deque(maxlen=5)
+
+# Aggiungi sample corrente
+self.velocity_smooth_buffer.append(self.current_velocity)
+
+# Calcola velocità smoothed per trigger detection
+if len(self.velocity_smooth_buffer) >= VEL_SMOOTH_WINDOW:
+    velocity_smooth = sum(self.velocity_smooth_buffer) / len(self.velocity_smooth_buffer)
+```
+
+**Scopo:** Evitare falsi trigger da rumore/oscillazioni muscolari
+
+### FASE 2: State Machine Real-Time (Marker VBT)
+
+#### 2.1 Parametri Temporali (Come Vitruve, Enode, Beast)
+
+```python
+# Soglie velocità (m/s)
+VEL_ECCENTRIC_THRESHOLD = -0.12      # Inizio eccentric: v < -0.12 m/s
+VEL_CONCENTRIC_THRESHOLD = 0.08      # Fine rep: v < 0.08 m/s
+VEL_ZERO_CROSSING_TOLERANCE = 0.03   # Window bottom: |v| < 0.03 m/s
+
+# Finestre temporali (seconds)
+MIN_ECCENTRIC_WINDOW = 0.20    # 200ms minimo eccentric (Vitruve standard)
+MAX_CONCENTRIC_WINDOW = 1.5    # 1.5s massimo concentric
+MIN_CONCENTRIC_DURATION = 0.15 # 150ms minimo concentric
+REFRACTORY_PERIOD = 0.5        # 500ms tra reps
+```
+
+#### 2.2 State Machine a 3 Stati
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    MARKER TRANSITIONS                         │
+└──────────────────────────────────────────────────────────────┘
+
+    ┌─────────────┐
+    │    REST     │ ← Stato iniziale, sensore fermo o tra reps
+    │  |v| ≈ 0    │
+    └──────┬──────┘
+           │
+           │ MARKER 1: ECCENTRIC START
+           │ Trigger: velocity_smooth < -0.12 m/s
+           │ Check: refractory period > 0.5s
+           ↓
+    ┌─────────────┐
+    │  ECCENTRIC  │ ← Fase di discesa (squat down)
+    │   v < 0     │
+    └──────┬──────┘
+           │
+           │ MARKER 2: BOTTOM (Zero-Crossing)
+           │ Trigger: velocity_smooth >= -0.03 m/s
+           │ Check: eccentric_duration >= 0.20s
+           │ Salva: bottom_idx, bottom_time
+           ↓
+    ┌─────────────┐
+    │ CONCENTRIC  │ ← Fase di salita (squat up)
+    │   v > 0     │
+    └──────┬──────┘
+           │
+           │ MARKER 3: REP END
+           │ Trigger: velocity_smooth < 0.08 m/s
+           │ Check: concentric_duration >= 0.15s
+           │ Action: FINALIZE REP + calcolo metriche
+           ↓
+    ┌─────────────┐
+    │    REST     │ ← Ritorno a riposo, pronto per prossima rep
+    └─────────────┘
+```
+
+#### 2.3 Implementazione State Machine
+
+```python
+def check_vbt_state_transition(self, current_time, current_idx):
+    """Real-time state machine - verifica OGNI sample (come dispositivi commerciali)"""
+    
+    if not self.baseline_calculated:
+        return  # Non ancora calibrato
+    
+    # Velocità smoothed per decisioni
+    velocity_smooth = sum(self.velocity_smooth_buffer) / len(self.velocity_smooth_buffer)
+    
+    # ═══════════════════════════════════════════════════════════
+    # STATO: REST
+    # ═══════════════════════════════════════════════════════════
+    if self.vbt_state == 'REST':
+        if velocity_smooth < -0.12:  # MARKER 1: ECCENTRIC START
+            # Check refractory period
+            if current_time - self.last_rep_end_time >= 0.5:
+                self.vbt_state = 'ECCENTRIC'
+                self.eccentric_start_time = current_time
+                self.eccentric_start_idx = current_idx
+                print(f"\n🔵 ECCENTRIC START (vel={velocity_smooth:.3f} m/s)")
+    
+    # ═══════════════════════════════════════════════════════════
+    # STATO: ECCENTRIC
+    # ═══════════════════════════════════════════════════════════
+    elif self.vbt_state == 'ECCENTRIC':
+        eccentric_duration = current_time - self.eccentric_start_time
         
-        # Cerca ritorno a BASE
-        for next_transition in state_changes[next:]:
-            if next_transition['to'] == 'BASE':
-                rep_end_idx = next_transition['idx']
-                rep_end_time = next_transition['time']
-                
-                # Trova BOTTOM come minimo locale
-                rep_segment = magnitude[rep_start_idx:rep_end_idx+1]
-                bottom_relative = np.argmin(rep_segment)
-                bottom_idx = rep_start_idx + bottom_relative
-                
-                # Valida profondità
-                if magnitude[bottom_idx] < MIN_DEPTH_THRESHOLD:
-                    # RIPETIZIONE VALIDA RILEVATA!
-                    valid_reps.append({
-                        'start_idx': rep_start_idx,
-                        'bottom_idx': bottom_idx,
-                        'end_idx': rep_end_idx,
-                        # ... altre info
-                    })
+        # MARKER 2: BOTTOM (zero-crossing)
+        if velocity_smooth >= -0.03:  # Vicino a zero
+            if eccentric_duration >= 0.20:  # Minimo 200ms
+                self.vbt_state = 'CONCENTRIC'
+                self.bottom_time = current_time
+                self.bottom_idx = current_idx
+                self.concentric_start_time = current_time
+                self.concentric_start_idx = current_idx
+                print(f"⚫ BOTTOM (vel={velocity_smooth:.3f} m/s, ecc={eccentric_duration:.3f}s)")
+            else:
+                # False start - eccentric troppo corta
+                self.vbt_state = 'REST'
+                print(f"❌ FALSE START - ecc too short ({eccentric_duration:.3f}s)")
+        
+        # Timeout - eccentric troppo lenta
+        elif eccentric_duration > 3.0:
+            self.vbt_state = 'REST'
+            print(f"❌ ECCENTRIC TIMEOUT")
+    
+    # ═══════════════════════════════════════════════════════════
+    # STATO: CONCENTRIC
+    # ═══════════════════════════════════════════════════════════
+    elif self.vbt_state == 'CONCENTRIC':
+        concentric_duration = current_time - self.concentric_start_time
+        
+        # MARKER 3: REP END
+        if velocity_smooth < 0.08:  # Velocità scesa sotto soglia
+            if concentric_duration >= 0.15:  # Minimo 150ms
+                # REP COMPLETATA! Calcola metriche IMMEDIATAMENTE
+                self.finalize_rep(current_time, current_idx)
+                self.vbt_state = 'REST'
+            else:
+                # Troppo veloce - invalid
+                self.vbt_state = 'REST'
+                print(f"❌ CONCENTRIC TOO SHORT ({concentric_duration:.3f}s)")
+        
+        # Timeout - concentric troppo lunga
+        elif concentric_duration > 1.5:
+            self.vbt_state = 'REST'
+            print(f"❌ CONCENTRIC TIMEOUT ({concentric_duration:.3f}s > 1.5s)")
 ```
 
-### STEP 3: Calcolo Metriche VBT
-
-#### Mean Velocity (MV)
+### FASE 3: Finalizzazione Rep e Calcolo Metriche
 
 ```python
-# Integra velocità dalla magnitudine durante fase concentrica
-concentric_mag = magnitude[bottom_idx:concentric_peak_idx+1]
-mag_accel_net = [(mag - baseline_value) * 9.81 for mag in concentric_mag]
+def finalize_rep(self, end_time, end_idx):
+    """Finalizza rep e calcola tutte le metriche VBT IMMEDIATAMENTE (80-250ms)"""
+    
+    # Trova picco velocità durante fase concentrica
+    concentric_velocities = list(self.velocity_data)[self.concentric_start_idx:end_idx+1]
+    peak_vel_relative = concentric_velocities.index(max(concentric_velocities))
+    concentric_peak_idx = self.concentric_start_idx + peak_vel_relative
+    
+    # Calcola TUTTE le metriche VBT
+    self.calculate_vbt_metrics_from_indices(
+        self.bottom_idx,
+        concentric_peak_idx,
+        end_idx,
+        self.bottom_time,
+        list(self.timestamps_data)[concentric_peak_idx],
+        self.eccentric_start_time,
+        end_time
+    )
+    
+    self.rep_count += 1
+    self.last_rep_end_time = end_time
+    
+    # Salva per grafico temporale (barre impilate)
+    self.state_history.append({
+        'rep_num': self.rep_count,
+        'ecc_duration': self.last_eccentric_duration,
+        'conc_duration': self.last_concentric_duration
+    })
+    
+    # Feedback istantaneo (come dispositivi commerciali)
+    print(f"\n✅ REP #{self.rep_count} COMPLETED (INSTANT)")
+    print(f"   ⚡ Response time: ~{(time.time() - end_time)*1000:.0f}ms")
+```
 
-# Integra per ottenere velocità
-velocity = [0.0]
+### FASE 4: Calcolo Metriche VBT Dettagliate
+
+#### 4.1 Estrazione Fase Concentrica
+
+```python
+def calculate_vbt_metrics_from_indices(self, bottom_idx, concentric_peak_idx, rep_end_idx,
+                                       bottom_time, concentric_peak_time, 
+                                       rep_start_time, rep_end_time):
+    
+    # Estrai dati fase concentrica (bottom → peak)
+    mag_data_list = list(self.magnitude_data)
+    timestamps_list = list(self.timestamps_data)
+    
+    concentric_mag = mag_data_list[bottom_idx:concentric_peak_idx + 1]
+    concentric_time = timestamps_list[bottom_idx:concentric_peak_idx + 1]
+    
+    # Usa baseline calibrata (NON 1.0g fisso qui!)
+    baseline_value = self.baseline_value
+    mag_accel_net = [(mag - baseline_value) * 9.81 for mag in concentric_mag]  # m/s²
+```
+
+**📊 Debug Info:**
+```
+🔍 DEBUG VBT Calculation:
+   Baseline used: 0.998g
+   Concentric mag range: 0.873g to 1.245g
+   Net accel range: -1.23 to 2.42 m/s²
+   Samples in concentric: 23
+```
+
+#### 4.2 Doppia Integrazione: Accelerazione → Velocità → Displacement
+
+```python
+# Integrazione per velocità e spostamento
+velocity = [0.0]  # Parte da zero al bottom
+displacement = [0.0]
+
 for i in range(1, len(mag_accel_net)):
-    dt = timestamps[i] - timestamps[i-1]
-    velocity.append(velocity[-1] + mag_accel_net[i] * dt)
+    dt = concentric_time[i] - concentric_time[i-1]
+    
+    # Velocità: v(t) = v(t-1) + a(t)·dt
+    v_new = velocity[-1] + mag_accel_net[i] * dt
+    velocity.append(v_new)
+    
+    # Displacement (ROM): s(t) = s(t-1) + v(t)·dt
+    d_new = displacement[-1] + v_new * dt
+    displacement.append(d_new)
+```
 
-# Media delle velocità positive
-positive_vel = [v for v in velocity if v > 0]
-mean_velocity = np.mean(positive_vel) if len(positive_vel) > 0 else 0.0
+#### 4.3 Mean Velocity (MV)
+
+```python
+# Media delle velocità POSITIVE durante concentrica
+positive_velocity = [v for v in velocity if v > 0]
+
+if positive_velocity:
+    self.last_mean_velocity = sum(positive_velocity) / len(positive_velocity)
+else:
+    self.last_mean_velocity = 0.0
 ```
 
 **Interpretazione VBT:**
-- `>0.50 m/s`: Zona velocità/potenza (<60% 1RM) - allenamento esplosivo
-- `0.30-0.50 m/s`: Zona forza-velocità (60-80% 1RM) - ipertrofia/forza
-- `0.15-0.30 m/s`: Zona forza massimale (80-90% 1RM)
-- `<0.15 m/s`: Carico molto pesante (>90% 1RM) - forza massima
 
-#### Peak Velocity (PV)
+| Range MV | %1RM | Zona Allenamento | Obiettivo |
+|----------|------|------------------|----------|
+| `>0.75 m/s` | <40% | Esplosiva/Balistica | Potenza, RFD |
+| `0.50-0.75 m/s` | 40-60% | Velocità | Forza esplosiva |
+| `0.30-0.50 m/s` | 60-80% | Forza-Velocità | Ipertrofia, forza |
+| `0.15-0.30 m/s` | 80-90% | Forza Massimale | Neuronal, max strength |
+| `<0.15 m/s` | >90% | Forza Assoluta | 1RM testing |
+
+#### 4.4 Peak Velocity (PV)
 
 ```python
-peak_velocity = np.max(conc_velocity)
+self.last_peak_velocity = max(velocity)
 ```
 
 **Uso:** Indicatore chiave per:
-- Movimenti olimpici (clean, snatch): PV > 2.0 m/s
-- Jump squat: PV tipicamente 1.5-3.0 m/s
+- Movimenti olimpici (clean, snatch): `PV > 2.0 m/s`
+- Jump squat: `PV = 1.5-3.0 m/s`
 - Potenza esplosiva: correlazione alta con performance atletica
+- Testing: PV @ 1RM tipicamente `0.10-0.15 m/s`
 
-#### Mean Propulsive Velocity (MPV)
+#### 4.5 Mean Propulsive Velocity (MPV)
 
 ```python
-# Solo dove accelerazione è ancora positiva (esclude decelerazione finale)
-propulsive_mask = conc_accel > 0
-mean_propulsive_velocity = np.mean(conc_velocity[propulsive_mask])
+# MPV = media velocità SOLO dove accelerazione è ancora positiva
+propulsive_indices = [i for i, a in enumerate(mag_accel_net) if a > 0 and i > 0]
+
+if propulsive_indices:
+    propulsive_velocities = [velocity[i] for i in propulsive_indices]
+    self.last_mean_propulsive_velocity = sum(propulsive_velocities) / len(propulsive_velocities)
+else:
+    self.last_mean_propulsive_velocity = 0.0
 ```
 
-**Importanza:**
-- Con carichi pesanti (>80% 1RM), la fase finale è decelerazione
-- MPV esclude questa "frenata", misurando solo lo sforzo propulsivo reale
-- Più rappresentativo dell'intensità effettiva dello sforzo
+**📊 Importanza MPV:**
 
-#### Range of Motion (ROM)
+```
+Velocità durante concentrica:
+    ↑
+    │     /\        ← Fase propulsiva (a > 0)
+    │    /  \       
+    │   /    \____  ← Fase decelerazione (a < 0)
+    │  /           ↓ Fine rep
+    └──────────────→ t
+    
+    MPV = media solo fase /\  (esclude ____)
+    MV = media tutta fase /\_____
+```
+
+**Perché MPV > MV:**
+- Con carichi pesanti (>80% 1RM), fase finale è decelerazione passiva
+- MPV esclude questa "frenata", misurando solo sforzo propulsivo attivo
+- Più rappresentativo dell'intensità reale dello sforzo
+- Standard per VBT load-velocity profiling
+
+#### 4.6 Time to Peak Velocity
 
 ```python
-# Integra velocità per ottenere spostamento
-displacement = np.zeros(len(conc_velocity))
-for j in range(1, len(displacement)):
-    dt = conc_time[j] - conc_time[j-1]
-    displacement[j] = displacement[j-1] + conc_velocity[j] * dt
-rom = displacement[-1]  # metri
+peak_vel_idx = velocity.index(max(velocity))
+self.last_time_to_peak_velocity = concentric_time[peak_vel_idx] - concentric_time[0]
+```
+
+**Significato:**
+- Tempo per raggiungere velocità massima
+- Indicatore di Rate of Force Development (RFD)
+- Più corto = più esplosivo
+
+#### 4.7 Range of Motion (ROM)
+
+```python
+# ROM = displacement finale (già calcolato nell'integrazione)
+self.last_concentric_displacement = displacement[-1]  # metri
 ```
 
 **Riferimenti ROM per squat:**
-- Squat completo (full depth): 0.4-0.6 m
-- Squat parallelo: 0.3-0.4 m
-- Squat parziale: <0.3 m
 
-#### Potenza (Power)
+| Profondità | ROM Tipica | Note |
+|------------|------------|----- |
+| Full Depth (ATG) | 0.50-0.65 m | Femore sotto parallelo |
+| Parallel | 0.35-0.45 m | Femore parallelo a terra |
+| Partial | 0.20-0.30 m | Quarter squat |
+
+#### 4.8 Potenza Meccanica (Power)
 
 ```python
-MASS = 80  # kg (atleta + bilanciere + carico)
+# P(t) = m · a(t) · v(t)
+MASS = 1.0  # kg (default, deve essere impostato dall'utente)
 
-# Usa accelerazione netta dalla magnitudine
-mag_accel_net = [(mag - baseline_value) * 9.81 for mag in concentric_mag]
-
-# Calcola potenza istantanea
 power = [MASS * mag_accel_net[i] * velocity[i] for i in range(len(velocity))]
-mean_power = np.mean([p for p in power if p > 0])
-peak_power = np.max(power)
 
-# Mean Propulsive Power (solo dove accel > 0)
-propulsive_mask = [a > 0 for a in mag_accel_net]
-mean_propulsive_power = np.mean([power[i] for i in range(len(power)) if propulsive_mask[i]])
+# Mean Power (solo valori positivi)
+positive_power = [p for p in power if p > 0]
+if positive_power:
+    self.last_mean_power = sum(positive_power) / len(positive_power)
+    self.last_peak_power = max(power)
+else:
+    self.last_mean_power = 0.0
+    self.last_peak_power = 0.0
+```
+
+**Mean Propulsive Power (MPP):**
+
+```python
+# MPP = potenza media solo durante fase propulsiva (a > 0)
+propulsive_indices = [i for i, a in enumerate(mag_accel_net) if a > 0]
+if propulsive_indices:
+    propulsive_power = [power[i] for i in propulsive_indices]
+    self.last_mean_propulsive_power = sum(propulsive_power) / len(propulsive_power)
+else:
+    self.last_mean_propulsive_power = 0.0
 ```
 
 **Formula:** `P = m · a · v`
-- `a` = accelerazione netta dalla magnitudine (m/s²)
-- `v` = velocità integrata (m/s)
-- Correlata con performance esplosiva
-- Peak power: indicatore principale per sport di potenza
-- Mean propulsive power: misura sostenibilità dello sforzo
+- `m` = massa totale (atleta + bilanciere + dischi) [kg]
+- `a` = accelerazione netta dalla magnitudine [m/s²]
+- `v` = velocità integrata [m/s]
+- Output in **Watt**
+
+**Riferimenti Power per squat:**
+
+| Carico | Mean Power | Peak Power | Atleta |
+|--------|-----------|------------|--------|
+| Jump Squat (20kg) | 800-1200 W | 1500-2500 W | Avanzato |
+| 60% 1RM | 400-600 W | 800-1200 W | Intermedio |
+| 80% 1RM | 250-400 W | 500-800 W | Forza |
+| 90% 1RM | 150-250 W | 300-500 W | Max strength |
+
+#### 4.9 Durate Fasi
+
+```python
+# Durate calcolate da marker temporali
+self.last_eccentric_duration = bottom_time - rep_start_time
+self.last_concentric_duration = concentric_time[-1] - concentric_time[0]
+self.last_rep_duration = self.last_eccentric_duration + self.last_concentric_duration
+```
+
+**Time Under Tension (TUT):**
+- Squat lento (ipertrofia): TUT = 4-6s
+- Squat normale (forza): TUT = 2-3s
+- Squat esplosivo (potenza): TUT = 1-2s
+
+#### 4.10 Velocity Loss (VL%)
+
+```python
+# VL% = perdita velocità rispetto alla prima rep
+if self.first_rep_mean_velocity is None:
+    self.first_rep_mean_velocity = self.last_mean_velocity  # Prima rep = baseline
+
+if self.first_rep_mean_velocity > 0:
+    self.velocity_loss_percent = ((self.first_rep_mean_velocity - self.last_mean_velocity) 
+                                  / self.first_rep_mean_velocity) * 100
+```
+
+**Soglie Velocity Loss:**
+
+| VL% | Fatica | Azione Raccomandata | Obiettivo Allenamento |
+|-----|--------|---------------------|----------------------|
+| `<10%` | Minima | Continua serie | Tecnica, velocità |
+| `10-20%` | Moderata | Stop per ipertrofia | Hypertrophy |
+| `20-30%` | Significativa | Stop per forza | Strength |
+| `>30%` | Eccessiva | Stop immediato | Recovery needed |
+
+**Applicazione pratica:**
+```python
+if self.velocity_loss_percent > 20:
+    print("⚠️  STOP SET - Velocity Loss >20%")
+    # Termina serie, riposo esteso
 
 ---
 
-## 🔄 Parametri Adattivi
+## 🔄 Parametri Configurabili del Sistema VBT
+
+### 📋 Inventario Completo dei Parametri
+
+Il sistema VBT ha **14 parametri configurabili** suddivisi in **5 gruppi funzionali**:
+
+#### **GRUPPO 1: Soglie Magnitudine** (3 parametri - DIPENDENTI)
+Definiscono le zone di accelerazione per rilevare movimento vs riposo.
+
+```python
+BASELINE_ZONE = 0.06        # ±6% zona riposo (default: 0.06)
+MIN_DEPTH_MAG = 0.60        # Minimo profondità movimento (default: 0.60g)
+MIN_PEAK_MAG = 1.05         # Minimo picco concentrico (default: 1.05g)
+```
+
+**Vincolo:** `MIN_DEPTH_MAG < baseline < MIN_PEAK_MAG`  
+**Quando tunarli:**
+- `BASELINE_ZONE`: ↑ per sensori rumorosi, ↓ per maggiore sensibilità
+- `MIN_DEPTH_MAG`: ↓ per movimenti parziali (quarter squat), ↑ per full depth
+- `MIN_PEAK_MAG`: ↓ per movimenti controllati, ↑ per esplosivi/balistici
+
+---
+
+#### **GRUPPO 2: Finestre Temporali** (4 parametri - CORRELATI)
+Definiscono durate minime/massime delle fasi per validazione movimento.
+
+```python
+MIN_ECCENTRIC_WINDOW = 0.30    # Min durata fase eccentrica (default: 300ms)
+MAX_CONCENTRIC_WINDOW = 2.5    # Max durata fase concentrica (default: 2.5s)
+MIN_CONCENTRIC_DURATION = 0.15 # Min durata fase concentrica (default: 150ms)
+REFRACTORY_PERIOD = 0.8        # Pausa obbligatoria tra reps (default: 800ms)
+```
+
+**Vincolo:** `MIN_CONCENTRIC_DURATION < MAX_CONCENTRIC_WINDOW`  
+**Quando tunarli:**
+- ↓ tutte le finestre per esercizi esplosivi/balistici (jump, olympic lifts)
+- ↑ tutte le finestre per esercizi strength (squat massimale, slow eccentric)
+- `REFRACTORY_PERIOD`: ↓ per cluster sets, ↑ per movimenti lenti
+
+---
+
+#### **GRUPPO 3: Signal Processing** (2 parametri - INDIPENDENTI)
+Controllo smoothing e analisi del segnale.
+
+```python
+MAG_SMOOTH_WINDOW = 5          # Smoothing magnitudine (default: 5 samples)
+STD_WINDOW = 20                # Finestra calcolo variabilità (default: 20 samples)
+```
+
+**Quando tunarli:**
+- `MAG_SMOOTH_WINDOW`: ↑ per sensori rumorosi (latenza aumenta), ↓ per movimenti rapidi
+- `STD_WINDOW`: ↑ per migliore stima variabilità, ↓ per maggiore reattività
+
+---
+
+#### **GRUPPO 4: Rilevamento Movimento** (2 parametri - DIPENDENTI)
+Soglie STD per distinguere movimento reale da rumore.
+
+```python
+MIN_MOVEMENT_STD = 0.015       # Soglia movimento reale (default: 0.015g)
+MAX_NOISE_STD = 0.008          # Soglia rumore statico (default: 0.008g)
+```
+
+**Vincolo critico:** `MAX_NOISE_STD < MIN_MOVEMENT_STD`  
+**Gap:** 0.007g - zona di transizione (né movimento né riposo)  
+**Quando tunarli:**
+- ↑ entrambi per ambienti rumorosi (palestra affollata, vibrazioni)
+- ↓ entrambi per ambienti controllati
+- Mantenere gap ≥0.005g per stabilità
+
+---
+
+#### **GRUPPO 5: Event Window** (2 parametri - DIPENDENTI)
+Controllo finestra di analisi post-trigger.
+
+```python
+WINDOW_DURATION = 2.5          # Durata finestra analisi (default: 2.5s)
+PRE_BUFFER_SIZE = 25           # Pre-buffer campioni (default: 25 = 0.5s @ 50Hz)
+```
+
+**Vincolo:** `PRE_BUFFER_SIZE < WINDOW_DURATION * sample_rate`  
+**Quando tunarli:**
+- `WINDOW_DURATION`: ↑ per movimenti lenti, ↓ per movimenti rapidi
+- `PRE_BUFFER_SIZE`: mantieni ~0.4-0.6s per catturare countermovement
+
+---
+
+#### **PARAMETRO NASCOSTO: Conversione Velocità** (1 parametro - CRITICO)
+⚠️ **ATTENZIONE:** Parametro hardcoded nella formula di calcolo velocità!
+
+```python
+# Linea 495 in vbt.py
+mean_velocity = abs(delta_mag) * 9.81 * 0.5  # <-- FATTORE 0.5 hardcoded!
+```
+
+**Quando tunarlo:**
+- **Richiede calibrazione con ground truth** (encoder lineare, sistema motion capture)
+- Valore ottimale dipende da: esercizio, placement sensore, biomeccanica atleta
+- Range tipico: 0.3 - 0.8 (0.5 è media generica)
+
+---
+
+### 📊 Tabella Riepilogativa Parametri
+
+| # | Gruppo | Parametro | Default | Range Tipico | Impatto |
+|---|--------|-----------|---------|--------------|---------|
+| 1 | Magnitudine | `BASELINE_ZONE` | 0.06 | 0.04-0.10 | Sensibilità trigger |
+| 2 | Magnitudine | `MIN_DEPTH_MAG` | 0.60g | 0.50-0.80g | Profondità richiesta |
+| 3 | Magnitudine | `MIN_PEAK_MAG` | 1.05g | 1.05-1.50g | Esplosività richiesta |
+| 4 | Temporale | `MIN_ECCENTRIC_WINDOW` | 0.30s | 0.15-0.60s | Durata discesa |
+| 5 | Temporale | `MAX_CONCENTRIC_WINDOW` | 2.5s | 1.5-4.0s | Timeout salita |
+| 6 | Temporale | `MIN_CONCENTRIC_DURATION` | 0.15s | 0.10-0.30s | Velocità minima |
+| 7 | Temporale | `REFRACTORY_PERIOD` | 0.8s | 0.3-2.0s | Pausa tra reps |
+| 8 | Signal Proc | `MAG_SMOOTH_WINDOW` | 5 | 3-10 | Smoothing/latenza |
+| 9 | Signal Proc | `STD_WINDOW` | 20 | 10-50 | Analisi variabilità |
+| 10 | Movimento | `MIN_MOVEMENT_STD` | 0.015g | 0.010-0.025g | Soglia movimento |
+| 11 | Movimento | `MAX_NOISE_STD` | 0.008g | 0.005-0.012g | Soglia rumore |
+| 12 | Window | `WINDOW_DURATION` | 2.5s | 1.5-4.0s | Durata analisi |
+| 13 | Window | `PRE_BUFFER_SIZE` | 25 | 15-50 | Pre-buffer |
+| 14 | **CRITICO** | **Velocity Factor** | **0.5** | **0.3-0.8** | **Accuratezza metriche** |
+
+---
+
+### 🔧 Configurazione JSON: Implementazione Pratica
+
+#### Struttura File `vbt_config.json`
+
+```json
+{
+  "version": "1.0.0",
+  "description": "VBT Configuration - Tunable parameters for CL837 Monitor",
+  "last_updated": "2025-11-20",
+  
+  "profiles": {
+    "squat_heavy": {
+      "description": "Heavy squat (80-95% 1RM)",
+      "magnitude_thresholds": {
+        "baseline_zone": 0.06,
+        "min_depth_mag": 0.50,
+        "min_peak_mag": 1.15
+      },
+      "temporal_windows": {
+        "min_eccentric_window": 0.50,
+        "max_concentric_window": 3.0,
+        "min_concentric_duration": 0.20,
+        "refractory_period": 2.0
+      },
+      "signal_processing": {
+        "mag_smooth_window": 7,
+        "std_window": 25
+      },
+      "movement_detection": {
+        "min_movement_std": 0.020,
+        "max_noise_std": 0.010
+      },
+      "event_window": {
+        "window_duration": 3.5,
+        "pre_buffer_size": 30
+      },
+      "velocity_conversion": {
+        "factor": 0.45,
+        "calibrated": false,
+        "notes": "Requires calibration with linear encoder"
+      }
+    },
+    
+    "squat_speed": {
+      "description": "Speed squat (50-70% 1RM)",
+      "magnitude_thresholds": {
+        "baseline_zone": 0.06,
+        "min_depth_mag": 0.65,
+        "min_peak_mag": 1.30
+      },
+      "temporal_windows": {
+        "min_eccentric_window": 0.20,
+        "max_concentric_window": 1.5,
+        "min_concentric_duration": 0.15,
+        "refractory_period": 0.5
+      },
+      "signal_processing": {
+        "mag_smooth_window": 5,
+        "std_window": 20
+      },
+      "movement_detection": {
+        "min_movement_std": 0.015,
+        "max_noise_std": 0.008
+      },
+      "event_window": {
+        "window_duration": 2.5,
+        "pre_buffer_size": 25
+      },
+      "velocity_conversion": {
+        "factor": 0.55,
+        "calibrated": false
+      }
+    },
+    
+    "jump": {
+      "description": "Jump squat / CMJ (ballistic)",
+      "magnitude_thresholds": {
+        "baseline_zone": 0.08,
+        "min_depth_mag": 0.70,
+        "min_peak_mag": 1.50
+      },
+      "temporal_windows": {
+        "min_eccentric_window": 0.15,
+        "max_concentric_window": 1.0,
+        "min_concentric_duration": 0.10,
+        "refractory_period": 0.3
+      },
+      "signal_processing": {
+        "mag_smooth_window": 3,
+        "std_window": 15
+      },
+      "movement_detection": {
+        "min_movement_std": 0.025,
+        "max_noise_std": 0.010
+      },
+      "event_window": {
+        "window_duration": 2.0,
+        "pre_buffer_size": 20
+      },
+      "velocity_conversion": {
+        "factor": 0.65,
+        "calibrated": false
+      }
+    },
+    
+    "bench_press": {
+      "description": "Bench press (all loads)",
+      "magnitude_thresholds": {
+        "baseline_zone": 0.06,
+        "min_depth_mag": 0.55,
+        "min_peak_mag": 1.10
+      },
+      "temporal_windows": {
+        "min_eccentric_window": 0.30,
+        "max_concentric_window": 2.5,
+        "min_concentric_duration": 0.15,
+        "refractory_period": 1.0
+      },
+      "signal_processing": {
+        "mag_smooth_window": 5,
+        "std_window": 20
+      },
+      "movement_detection": {
+        "min_movement_std": 0.015,
+        "max_noise_std": 0.008
+      },
+      "event_window": {
+        "window_duration": 2.5,
+        "pre_buffer_size": 25
+      },
+      "velocity_conversion": {
+        "factor": 0.50,
+        "calibrated": false
+      }
+    },
+    
+    "deadlift": {
+      "description": "Deadlift (concentric only)",
+      "magnitude_thresholds": {
+        "baseline_zone": 0.08,
+        "min_depth_mag": 0.60,
+        "min_peak_mag": 1.20
+      },
+      "temporal_windows": {
+        "min_eccentric_window": 0.10,
+        "max_concentric_window": 3.0,
+        "min_concentric_duration": 0.20,
+        "refractory_period": 2.5
+      },
+      "signal_processing": {
+        "mag_smooth_window": 6,
+        "std_window": 25
+      },
+      "movement_detection": {
+        "min_movement_std": 0.020,
+        "max_noise_std": 0.010
+      },
+      "event_window": {
+        "window_duration": 3.0,
+        "pre_buffer_size": 20
+      },
+      "velocity_conversion": {
+        "factor": 0.40,
+        "calibrated": false
+      }
+    }
+  },
+  
+  "default_profile": "squat_speed"
+}
+```
+
+---
+
+#### Implementazione Python: Caricamento Configurazione
+
+```python
+# File: vbt_config.py
+import json
+from pathlib import Path
+from typing import Dict, Any
+
+class VBTConfig:
+    """Configuration manager for VBT parameters with JSON profiles"""
+    
+    def __init__(self, config_path: str = "vbt_config.json"):
+        self.config_path = Path(config_path)
+        self.config = self._load_config()
+        self.current_profile = self.config.get('default_profile', 'squat_speed')
+        
+    def _load_config(self) -> Dict[str, Any]:
+        """Load configuration from JSON file"""
+        if not self.config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {self.config_path}")
+        
+        with open(self.config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    
+    def get_profile(self, profile_name: str = None) -> Dict[str, Any]:
+        """Get parameters for specific profile"""
+        if profile_name is None:
+            profile_name = self.current_profile
+        
+        if profile_name not in self.config['profiles']:
+            available = list(self.config['profiles'].keys())
+            raise ValueError(f"Profile '{profile_name}' not found. Available: {available}")
+        
+        return self.config['profiles'][profile_name]
+    
+    def set_profile(self, profile_name: str):
+        """Switch to different profile"""
+        if profile_name not in self.config['profiles']:
+            raise ValueError(f"Profile '{profile_name}' not found")
+        self.current_profile = profile_name
+        print(f"✅ Profile switched to: {profile_name}")
+    
+    def list_profiles(self) -> Dict[str, str]:
+        """List all available profiles with descriptions"""
+        return {
+            name: profile['description'] 
+            for name, profile in self.config['profiles'].items()
+        }
+    
+    def get_params(self, profile_name: str = None) -> Dict[str, float]:
+        """Get flattened parameter dictionary for easy access"""
+        profile = self.get_profile(profile_name)
+        
+        params = {}
+        
+        # Magnitude thresholds
+        mag = profile['magnitude_thresholds']
+        params['BASELINE_ZONE'] = mag['baseline_zone']
+        params['MIN_DEPTH_MAG'] = mag['min_depth_mag']
+        params['MIN_PEAK_MAG'] = mag['min_peak_mag']
+        
+        # Temporal windows
+        temp = profile['temporal_windows']
+        params['MIN_ECCENTRIC_WINDOW'] = temp['min_eccentric_window']
+        params['MAX_CONCENTRIC_WINDOW'] = temp['max_concentric_window']
+        params['MIN_CONCENTRIC_DURATION'] = temp['min_concentric_duration']
+        params['REFRACTORY_PERIOD'] = temp['refractory_period']
+        
+        # Signal processing
+        sig = profile['signal_processing']
+        params['MAG_SMOOTH_WINDOW'] = sig['mag_smooth_window']
+        params['STD_WINDOW'] = sig['std_window']
+        
+        # Movement detection
+        mov = profile['movement_detection']
+        params['MIN_MOVEMENT_STD'] = mov['min_movement_std']
+        params['MAX_NOISE_STD'] = mov['max_noise_std']
+        
+        # Event window
+        win = profile['event_window']
+        params['WINDOW_DURATION'] = win['window_duration']
+        params['PRE_BUFFER_SIZE'] = win['pre_buffer_size']
+        
+        # Velocity conversion
+        vel = profile['velocity_conversion']
+        params['VELOCITY_FACTOR'] = vel['factor']
+        params['VELOCITY_CALIBRATED'] = vel.get('calibrated', False)
+        
+        return params
+    
+    def validate_params(self, params: Dict[str, float]) -> bool:
+        """Validate parameter constraints"""
+        errors = []
+        
+        # Check magnitude ordering
+        if params['MIN_DEPTH_MAG'] >= params['MIN_PEAK_MAG']:
+            errors.append("MIN_DEPTH_MAG must be < MIN_PEAK_MAG")
+        
+        # Check temporal ordering
+        if params['MIN_CONCENTRIC_DURATION'] >= params['MAX_CONCENTRIC_WINDOW']:
+            errors.append("MIN_CONCENTRIC_DURATION must be < MAX_CONCENTRIC_WINDOW")
+        
+        # Check STD gap
+        if params['MAX_NOISE_STD'] >= params['MIN_MOVEMENT_STD']:
+            errors.append("MAX_NOISE_STD must be < MIN_MOVEMENT_STD")
+        
+        std_gap = params['MIN_MOVEMENT_STD'] - params['MAX_NOISE_STD']
+        if std_gap < 0.005:
+            errors.append(f"STD gap too small ({std_gap:.4f}g). Recommended: ≥0.005g")
+        
+        # Check window buffer
+        max_buffer = params['WINDOW_DURATION'] * 50  # Assume 50Hz sampling
+        if params['PRE_BUFFER_SIZE'] >= max_buffer:
+            errors.append(f"PRE_BUFFER_SIZE ({params['PRE_BUFFER_SIZE']}) >= window capacity ({max_buffer:.0f})")
+        
+        if errors:
+            print("❌ Parameter validation failed:")
+            for err in errors:
+                print(f"   - {err}")
+            return False
+        
+        print("✅ Parameters validated successfully")
+        return True
+    
+    def print_current_config(self):
+        """Print current configuration in readable format"""
+        profile = self.get_profile()
+        params = self.get_params()
+        
+        print(f"\n{'='*70}")
+        print(f"VBT CONFIGURATION: {self.current_profile}")
+        print(f"Description: {profile['description']}")
+        print(f"{'='*70}\n")
+        
+        print("📊 MAGNITUDE THRESHOLDS:")
+        print(f"   Baseline Zone:   ±{params['BASELINE_ZONE']*100:.0f}% ({params['BASELINE_ZONE']:.3f})")
+        print(f"   Min Depth:       {params['MIN_DEPTH_MAG']:.2f}g")
+        print(f"   Min Peak:        {params['MIN_PEAK_MAG']:.2f}g")
+        
+        print("\n⏱️  TEMPORAL WINDOWS:")
+        print(f"   Min Eccentric:   {params['MIN_ECCENTRIC_WINDOW']:.2f}s")
+        print(f"   Max Concentric:  {params['MAX_CONCENTRIC_WINDOW']:.2f}s")
+        print(f"   Min Concentric:  {params['MIN_CONCENTRIC_DURATION']:.2f}s")
+        print(f"   Refractory:      {params['REFRACTORY_PERIOD']:.2f}s")
+        
+        print("\n🔧 SIGNAL PROCESSING:")
+        print(f"   Mag Smooth:      {params['MAG_SMOOTH_WINDOW']} samples")
+        print(f"   STD Window:      {params['STD_WINDOW']} samples")
+        
+        print("\n🎯 MOVEMENT DETECTION:")
+        print(f"   Min Movement:    {params['MIN_MOVEMENT_STD']:.4f}g")
+        print(f"   Max Noise:       {params['MAX_NOISE_STD']:.4f}g")
+        std_gap = params['MIN_MOVEMENT_STD'] - params['MAX_NOISE_STD']
+        print(f"   Gap:             {std_gap:.4f}g")
+        
+        print("\n📦 EVENT WINDOW:")
+        print(f"   Duration:        {params['WINDOW_DURATION']:.2f}s")
+        print(f"   Pre-buffer:      {params['PRE_BUFFER_SIZE']} samples (~{params['PRE_BUFFER_SIZE']/50:.2f}s @ 50Hz)")
+        
+        print("\n⚡ VELOCITY CONVERSION:")
+        print(f"   Factor:          {params['VELOCITY_FACTOR']:.2f}")
+        calib_status = "✅ CALIBRATED" if params['VELOCITY_CALIBRATED'] else "⚠️  NOT CALIBRATED"
+        print(f"   Status:          {calib_status}")
+        
+        print(f"\n{'='*70}\n")
+
+
+# Usage example
+if __name__ == "__main__":
+    # Load configuration
+    config = VBTConfig("vbt_config.json")
+    
+    # List available profiles
+    print("📋 Available Profiles:")
+    for name, desc in config.list_profiles().items():
+        print(f"   - {name}: {desc}")
+    
+    # Get current parameters
+    params = config.get_params()
+    
+    # Validate
+    config.validate_params(params)
+    
+    # Print readable config
+    config.print_current_config()
+    
+    # Switch profile
+    config.set_profile("jump")
+    config.print_current_config()
+```
+
+---
+
+#### Integrazione in `vbt.py`
+
+```python
+# All'inizio del file vbt.py
+from vbt_config import VBTConfig
+
+class CL837VBTMonitor:
+    def __init__(self, config_file: str = "vbt_config.json", profile: str = None):
+        # Load configuration
+        self.vbt_config = VBTConfig(config_file)
+        
+        if profile:
+            self.vbt_config.set_profile(profile)
+        
+        # Get parameters
+        params = self.vbt_config.get_params()
+        
+        # Validate before using
+        if not self.vbt_config.validate_params(params):
+            raise ValueError("Invalid VBT configuration parameters")
+        
+        # === BLE Connection ===
+        self.client = None
+        self.device = None
+        self.is_connected = False
+        
+        # ... (rest of BLE setup)
+        
+        # === VBT Parameters from CONFIG ===
+        self.BASELINE_ZONE = params['BASELINE_ZONE']
+        self.MIN_DEPTH_MAG = params['MIN_DEPTH_MAG']
+        self.MIN_PEAK_MAG = params['MIN_PEAK_MAG']
+        
+        self.MIN_ECCENTRIC_WINDOW = params['MIN_ECCENTRIC_WINDOW']
+        self.MAX_CONCENTRIC_WINDOW = params['MAX_CONCENTRIC_WINDOW']
+        self.MIN_CONCENTRIC_DURATION = params['MIN_CONCENTRIC_DURATION']
+        self.REFRACTORY_PERIOD = params['REFRACTORY_PERIOD']
+        
+        self.MAG_SMOOTH_WINDOW = params['MAG_SMOOTH_WINDOW']
+        self.STD_WINDOW = params['STD_WINDOW']
+        
+        self.MIN_MOVEMENT_STD = params['MIN_MOVEMENT_STD']
+        self.MAX_NOISE_STD = params['MAX_NOISE_STD']
+        
+        self.WINDOW_DURATION = params['WINDOW_DURATION']
+        self.PRE_BUFFER_SIZE = params['PRE_BUFFER_SIZE']
+        
+        self.VELOCITY_FACTOR = params['VELOCITY_FACTOR']
+        
+        # Print configuration on startup
+        print("\n" + "="*70)
+        print("VBT CONFIGURATION LOADED")
+        print("="*70)
+        self.vbt_config.print_current_config()
+        
+        # ... (rest of __init__)
+
+# Uso nel main
+def main():
+    import sys
+    
+    # Parse command line args
+    profile = "squat_speed"  # default
+    if len(sys.argv) > 1:
+        profile = sys.argv[1]
+    
+    print(f"\n🚀 Starting VBT Monitor with profile: {profile}")
+    
+    monitor = CL837VBTMonitor(config_file="vbt_config.json", profile=profile)
+    
+    # ... (rest of main)
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### 🎯 Vantaggi della Configurazione JSON
+
+| Vantaggio | Descrizione |
+|-----------|-------------|
+| **Separazione Logica** | Parametri separati dal codice, facile modificare senza rebuild |
+| **Profili Multipli** | Switch rapido tra esercizi senza modificare codice |
+| **Validazione Automatica** | Constraints verificati prima di usare parametri |
+| **Versionamento** | Config file può essere versionato separatamente |
+| **Condivisione** | Facile condividere configurazioni ottimizzate tra utenti |
+| **Backup** | Salva configurazioni calibrate per diversi scenari |
+| **Documentazione Inline** | Descrizioni e note direttamente nel JSON |
+| **CLI Friendly** | `python vbt.py jump` carica profilo jump automaticamente |
+
+---
+
+### 🔬 Calibrazione Parametri: Workflow Raccomandato
+
+#### FASE 1: Raccolta Dati Ground Truth
+```bash
+# Registra 10 reps con encoder lineare (gold standard)
+python vbt.py squat_speed --record-session session_001
+```
+
+#### FASE 2: Tuning Iterativo
+```python
+# Script: tune_velocity_factor.py
+from vbt_config import VBTConfig
+import pandas as pd
+import numpy as np
+
+# Load encoder reference data
+encoder_data = pd.read_csv("encoder_session_001.csv")
+encoder_velocities = encoder_data['mean_velocity'].values  # Ground truth
+
+# Load IMU data with different factors
+factors = np.linspace(0.3, 0.8, 20)
+errors = []
+
+for factor in factors:
+    # Update config temporarily
+    config = VBTConfig()
+    params = config.get_params('squat_speed')
+    params['VELOCITY_FACTOR'] = factor
+    
+    # Recalculate velocities
+    imu_velocities = recalculate_with_factor(factor)  # Your function
+    
+    # Calculate error
+    rmse = np.sqrt(np.mean((imu_velocities - encoder_velocities)**2))
+    errors.append(rmse)
+    
+    print(f"Factor: {factor:.2f} | RMSE: {rmse:.4f} m/s")
+
+# Find optimal factor
+optimal_factor = factors[np.argmin(errors)]
+print(f"\n✅ OPTIMAL FACTOR: {optimal_factor:.3f}")
+print(f"   RMSE: {min(errors):.4f} m/s")
+
+# Update config permanently
+config.config['profiles']['squat_speed']['velocity_conversion']['factor'] = optimal_factor
+config.config['profiles']['squat_speed']['velocity_conversion']['calibrated'] = True
+
+with open('vbt_config.json', 'w') as f:
+    json.dump(config.config, f, indent=2)
+
+print("\n🎯 Configuration updated and saved!")
+```
+
+#### FASE 3: Validazione Cross-Exercise
+```bash
+# Test con diversi esercizi usando config calibrata
+python vbt.py bench_press
+python vbt.py deadlift
+python vbt.py jump
+```
+
+---
+
+## 🔄 Parametri Adattivi (Approccio Avanzato)
 
 ### Problema dei Parametri Hardcoded
 

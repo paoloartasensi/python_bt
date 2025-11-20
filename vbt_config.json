@@ -1,0 +1,165 @@
+{
+  "version": "1.0.0",
+  "description": "VBT Configuration - Tunable parameters for CL837 Monitor",
+  "last_updated": "2025-11-20",
+  
+  "profiles": {
+    "squat_heavy": {
+      "description": "Heavy squat (80-95% 1RM)",
+      "magnitude_thresholds": {
+        "baseline_zone": 0.06,
+        "min_depth_mag": 0.50,
+        "min_peak_mag": 1.15
+      },
+      "temporal_windows": {
+        "min_eccentric_window": 0.50,
+        "max_concentric_window": 3.0,
+        "min_concentric_duration": 0.20,
+        "refractory_period": 2.0
+      },
+      "signal_processing": {
+        "mag_smooth_window": 7,
+        "std_window": 25
+      },
+      "movement_detection": {
+        "min_movement_std": 0.020,
+        "max_noise_std": 0.010
+      },
+      "event_window": {
+        "window_duration": 3.5,
+        "pre_buffer_size": 30
+      },
+      "velocity_conversion": {
+        "factor": 0.45,
+        "calibrated": false,
+        "notes": "Requires calibration with linear encoder"
+      }
+    },
+    
+    "squat_speed": {
+      "description": "Speed squat (50-70% 1RM) - DEFAULT",
+      "magnitude_thresholds": {
+        "baseline_zone": 0.06,
+        "min_depth_mag": 0.60,
+        "min_peak_mag": 1.05
+      },
+      "temporal_windows": {
+        "min_eccentric_window": 0.30,
+        "max_concentric_window": 2.5,
+        "min_concentric_duration": 0.15,
+        "refractory_period": 0.8
+      },
+      "signal_processing": {
+        "mag_smooth_window": 5,
+        "std_window": 20
+      },
+      "movement_detection": {
+        "min_movement_std": 0.015,
+        "max_noise_std": 0.008
+      },
+      "event_window": {
+        "window_duration": 2.5,
+        "pre_buffer_size": 25
+      },
+      "velocity_conversion": {
+        "factor": 0.5,
+        "calibrated": false
+      }
+    },
+    
+    "jump": {
+      "description": "Jump squat / CMJ (ballistic)",
+      "magnitude_thresholds": {
+        "baseline_zone": 0.08,
+        "min_depth_mag": 0.70,
+        "min_peak_mag": 1.50
+      },
+      "temporal_windows": {
+        "min_eccentric_window": 0.15,
+        "max_concentric_window": 1.0,
+        "min_concentric_duration": 0.10,
+        "refractory_period": 0.3
+      },
+      "signal_processing": {
+        "mag_smooth_window": 3,
+        "std_window": 15
+      },
+      "movement_detection": {
+        "min_movement_std": 0.025,
+        "max_noise_std": 0.010
+      },
+      "event_window": {
+        "window_duration": 2.0,
+        "pre_buffer_size": 20
+      },
+      "velocity_conversion": {
+        "factor": 0.65,
+        "calibrated": false
+      }
+    },
+    
+    "bench_press": {
+      "description": "Bench press (all loads)",
+      "magnitude_thresholds": {
+        "baseline_zone": 0.06,
+        "min_depth_mag": 0.55,
+        "min_peak_mag": 1.10
+      },
+      "temporal_windows": {
+        "min_eccentric_window": 0.30,
+        "max_concentric_window": 2.5,
+        "min_concentric_duration": 0.15,
+        "refractory_period": 1.0
+      },
+      "signal_processing": {
+        "mag_smooth_window": 5,
+        "std_window": 20
+      },
+      "movement_detection": {
+        "min_movement_std": 0.015,
+        "max_noise_std": 0.008
+      },
+      "event_window": {
+        "window_duration": 2.5,
+        "pre_buffer_size": 25
+      },
+      "velocity_conversion": {
+        "factor": 0.50,
+        "calibrated": false
+      }
+    },
+    
+    "deadlift": {
+      "description": "Deadlift (concentric only)",
+      "magnitude_thresholds": {
+        "baseline_zone": 0.08,
+        "min_depth_mag": 0.60,
+        "min_peak_mag": 1.20
+      },
+      "temporal_windows": {
+        "min_eccentric_window": 0.10,
+        "max_concentric_window": 3.0,
+        "min_concentric_duration": 0.20,
+        "refractory_period": 2.5
+      },
+      "signal_processing": {
+        "mag_smooth_window": 6,
+        "std_window": 25
+      },
+      "movement_detection": {
+        "min_movement_std": 0.020,
+        "max_noise_std": 0.010
+      },
+      "event_window": {
+        "window_duration": 3.0,
+        "pre_buffer_size": 20
+      },
+      "velocity_conversion": {
+        "factor": 0.40,
+        "calibrated": false
+      }
+    }
+  },
+  
+  "default_profile": "squat_speed"
+}

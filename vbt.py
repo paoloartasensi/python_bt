@@ -18,11 +18,38 @@ matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from bleak import BleakClient, BleakScanner
+from vbt_config import VBTConfig
 
 class CL837VBTMonitor:
     """Minimalist VBT monitor with Output Sports style bar chart"""
     
-    def __init__(self):
+    def __init__(self, config_file: str = "vbt_config.json", profile: str = None):
+        # Load VBT configuration
+        try:
+            self.vbt_config = VBTConfig(config_file)
+            
+            if profile:
+                self.vbt_config.set_profile(profile)
+            
+            # Get parameters
+            params = self.vbt_config.get_params()
+            
+            # Validate before using
+            if not self.vbt_config.validate_params(params):
+                raise ValueError("Invalid VBT configuration parameters")
+            
+            print("\n" + "="*70)
+            print("VBT CONFIGURATION LOADED")
+            print("="*70)
+            self.vbt_config.print_current_config()
+            
+        except FileNotFoundError:
+            print("⚠️  Config file not found. Using default hardcoded values.")
+            params = self._get_default_params()
+        except Exception as e:
+            print(f"⚠️  Error loading config: {e}. Using default hardcoded values.")
+            params = self._get_default_params()
+        
         # BLE Connection
         self.client = None
         self.device = None
@@ -42,29 +69,29 @@ class CL837VBTMonitor:
         self.timestamps_data = deque(maxlen=self.max_samples)
         self.velocity_data = deque(maxlen=self.max_samples)
         
-        # VBT State Machine - BASED ON MAGNITUDE (more reliable)
-        self.BASELINE_ZONE = 0.06  # ±6% from baseline = REST zone (narrower)
-        self.MIN_DEPTH_MAG = 0.60  # Must drop below 0.60g to validate squat (full VBT range)
-        self.MIN_PEAK_MAG = 1.05  # Concentric peak must exceed 1.05g (real acceleration)
+        # VBT State Machine - FROM CONFIG
+        self.BASELINE_ZONE = params['BASELINE_ZONE']
+        self.MIN_DEPTH_MAG = params['MIN_DEPTH_MAG']
+        self.MIN_PEAK_MAG = params['MIN_PEAK_MAG']
         
-        self.MIN_ECCENTRIC_WINDOW = 0.30  # s - minimum 300ms descent (control)
-        self.MAX_CONCENTRIC_WINDOW = 2.5  # s - maximum 2.5s push
-        self.MIN_CONCENTRIC_DURATION = 0.15  # s - minimum 150ms push (explosive VBT range)
-        self.REFRACTORY_PERIOD = 0.8  # s - pause between reps (longer)
+        self.MIN_ECCENTRIC_WINDOW = params['MIN_ECCENTRIC_WINDOW']
+        self.MAX_CONCENTRIC_WINDOW = params['MAX_CONCENTRIC_WINDOW']
+        self.MIN_CONCENTRIC_DURATION = params['MIN_CONCENTRIC_DURATION']
+        self.REFRACTORY_PERIOD = params['REFRACTORY_PERIOD']
         
-        self.MAG_SMOOTH_WINDOW = 5  # Magnitude smoothing
+        self.MAG_SMOOTH_WINDOW = params['MAG_SMOOTH_WINDOW']
         self.mag_smooth_buffer = deque(maxlen=self.MAG_SMOOTH_WINDOW)
         
         # Variance/STD analysis to distinguish movement from noise
-        self.STD_WINDOW = 20  # Window for STD calculation (~400ms @ 50Hz)
+        self.STD_WINDOW = params['STD_WINDOW']
         self.mag_std_buffer = deque(maxlen=self.STD_WINDOW)
-        self.MIN_MOVEMENT_STD = 0.015  # Minimum STD threshold for real movement
-        self.MAX_NOISE_STD = 0.008  # Maximum STD threshold for static noise
+        self.MIN_MOVEMENT_STD = params['MIN_MOVEMENT_STD']
+        self.MAX_NOISE_STD = params['MAX_NOISE_STD']
         self.current_std = 0.0
         
-        # Event Window System - Time window for marker analysis
-        self.WINDOW_DURATION = 2.5  # 2.5 seconds recording after baseline break
-        self.PRE_BUFFER_SIZE = 25  # 0.5s @ 50Hz - pre-window buffer
+        # Event Window System - FROM CONFIG
+        self.WINDOW_DURATION = params['WINDOW_DURATION']
+        self.PRE_BUFFER_SIZE = params['PRE_BUFFER_SIZE']
         self.pre_buffer_mag = deque(maxlen=self.PRE_BUFFER_SIZE)
         self.pre_buffer_time = deque(maxlen=self.PRE_BUFFER_SIZE)
         self.pre_buffer_idx = deque(maxlen=self.PRE_BUFFER_SIZE)
@@ -94,6 +121,18 @@ class CL837VBTMonitor:
         self.baseline_samples = []
         self.BASELINE_SAMPLES_COUNT = 25
         self.baseline_value = 1.0
+        
+        # Velocity conversion factor - FROM CONFIG
+        self.VELOCITY_FACTOR = params['VELOCITY_FACTOR']
+        self.VELOCITY_CALIBRATED = params['VELOCITY_CALIBRATED']
+        if not self.VELOCITY_CALIBRATED:
+            print("\n⚠️  WARNING: Velocity conversion factor NOT calibrated!")
+            print(f"   Current factor: {self.VELOCITY_FACTOR:.2f}")
+            print("   Velocity metrics may not be accurate.")
+            print("   Calibrate with linear encoder for ground truth.\n")
+        
+        # Load weight (kg) - for power calculations
+        self.load_weight_kg = 0.0  # Will be set by user input
         
         # Real-time velocity integration
         self.current_velocity = 0.0
@@ -125,6 +164,26 @@ class CL837VBTMonitor:
         self.countdown_start_time = None
         self.countdown_duration = 3.0
         self.countdown_text = None
+    
+    def _get_default_params(self) -> dict:
+        """Fallback default parameters if config file not available"""
+        return {
+            'BASELINE_ZONE': 0.06,
+            'MIN_DEPTH_MAG': 0.60,
+            'MIN_PEAK_MAG': 1.05,
+            'MIN_ECCENTRIC_WINDOW': 0.30,
+            'MAX_CONCENTRIC_WINDOW': 2.5,
+            'MIN_CONCENTRIC_DURATION': 0.15,
+            'REFRACTORY_PERIOD': 0.8,
+            'MAG_SMOOTH_WINDOW': 5,
+            'STD_WINDOW': 20,
+            'MIN_MOVEMENT_STD': 0.015,
+            'MAX_NOISE_STD': 0.008,
+            'WINDOW_DURATION': 2.5,
+            'PRE_BUFFER_SIZE': 25,
+            'VELOCITY_FACTOR': 0.5,
+            'VELOCITY_CALIBRATED': False
+        }
 
     async def scan_and_connect(self):
         """Scan and connect to CL837"""
@@ -623,8 +682,8 @@ LAST REP:
         # === VALIDATE SQUAT ===
         is_valid = self.validate_squat_from_markers()
         
-        # === SAVE SCREENSHOT ===
-        self.save_window_screenshot(is_valid)
+        # === SAVE SCREENSHOT AND CSV ===
+        self.save_window_data(is_valid)
         
         if is_valid:
             self.finalize_rep_from_markers()
@@ -633,42 +692,119 @@ LAST REP:
         
         self.window_active = False
     
-    def save_window_screenshot(self, is_valid):
-        """Saves window screenshot with markers"""
+    def save_window_data(self, is_valid):
+        """Saves window screenshot AND CSV with all data and VBT metrics"""
         try:
             import os
+            import csv
             
-            # Create windowshots folder if it doesn't exist
-            screenshot_dir = "windowshots"
-            if not os.path.exists(screenshot_dir):
-                os.makedirs(screenshot_dir)
+            # Create base directories if they don't exist
+            screenshot_base = "windowshots"
+            csv_base = "csv_shots"
             
+            # Create subdirectory for current profile
+            screenshot_dir = os.path.join(screenshot_base, self.profile)
+            csv_dir = os.path.join(csv_base, self.profile)
+            
+            for d in [screenshot_dir, csv_dir]:
+                if not os.path.exists(d):
+                    os.makedirs(d)
+            
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            status = "VALID" if is_valid else "REJECTED"
+            
+            # === SAVE SCREENSHOT ===
             fig_s = plt.figure(figsize=(14, 6))
             ax_s = fig_s.add_subplot(111)
             times_rel = [(t - self.window_start_time) for t in self.window_data_time]
             ax_s.plot(times_rel, self.window_data_mag, 'purple', linewidth=2, label='Magnitude', alpha=0.8)
-            ax_s.axhline(y=self.baseline_value, color='blue', linestyle='--', linewidth=1.5)
-            ax_s.axhline(y=self.MIN_DEPTH_MAG, color='orange', linestyle='--', linewidth=1, alpha=0.6)
-            ax_s.axhline(y=self.MIN_PEAK_MAG, color='cyan', linestyle='--', linewidth=1, alpha=0.6)
+            ax_s.axhline(y=self.baseline_value, color='blue', linestyle='--', linewidth=1.5, label='Baseline')
+            ax_s.axhline(y=self.MIN_DEPTH_MAG, color='orange', linestyle='--', linewidth=1, alpha=0.6, label='Min Depth')
+            ax_s.axhline(y=self.MIN_PEAK_MAG, color='cyan', linestyle='--', linewidth=1, alpha=0.6, label='Min Peak')
             colors = {'counter_movement': 'yellow', 'peak': 'blue', 'bottom': 'red', 'deceleration': 'green'}
             for name, m in self.markers.items():
                 if m:
                     t = m['time'] - self.window_start_time
-                    ax_s.scatter([t], [m['mag']], s=200, marker='o', color=colors[name], edgecolors='black', linewidths=2, zorder=10)
+                    ax_s.scatter([t], [m['mag']], s=200, marker='o', color=colors[name], edgecolors='black', linewidths=2, zorder=10, label=name.replace('_', ' ').title())
                     ax_s.annotate(f"{m['mag']:.3f}g", xy=(t, m['mag']), xytext=(10, 10), textcoords='offset points', fontsize=9, fontweight='bold', bbox=dict(boxstyle='round', facecolor=colors[name], alpha=0.7))
-            status = "VALID" if is_valid else "REJECTED"
             ax_s.set_title(f"Event Window - {status}", fontsize=14, fontweight='bold')
             ax_s.set_xlabel("Time (s)", fontsize=12)
             ax_s.set_ylabel("Magnitude (g)", fontsize=12)
             ax_s.set_ylim(0, 2.0)
             ax_s.grid(True, alpha=0.3)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            fname = os.path.join(screenshot_dir, f"window_{ts}_{status}.png")
-            fig_s.savefig(fname, dpi=150, bbox_inches='tight')
+            ax_s.legend(loc='upper right', fontsize=8)
+            png_fname = os.path.join(screenshot_dir, f"window_{ts}_{status}.png")
+            fig_s.savefig(png_fname, dpi=150, bbox_inches='tight')
             plt.close(fig_s)
-            print(f"📸 {fname}")
+            print(f"📸 PNG: {png_fname}")
+            
+            # === SAVE CSV ===
+            csv_fname = os.path.join(csv_dir, f"window_{ts}_{status}.csv")
+            with open(csv_fname, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                
+                # Header: Metadata
+                writer.writerow(['# VBT Window Data Export'])
+                writer.writerow(['# Timestamp', ts])
+                writer.writerow(['# Status', status])
+                writer.writerow(['# Load Weight (kg)', self.load_weight_kg])
+                writer.writerow(['# Baseline (g)', f"{self.baseline_value:.4f}"])
+                writer.writerow(['# Min Depth Threshold (g)', f"{self.MIN_DEPTH_MAG:.2f}"])
+                writer.writerow(['# Min Peak Threshold (g)', f"{self.MIN_PEAK_MAG:.2f}"])
+                writer.writerow([])
+                
+                # VBT Metrics (if valid)
+                if is_valid:
+                    # Calculate simple metrics from markers
+                    peak = self.markers['peak']
+                    recoil = self.markers['bottom']
+                    time_to_peak = peak['time'] - self.window_start_time
+                    delta_mag = peak['mag'] - self.baseline_value
+                    mean_velocity = abs(delta_mag) * 9.81 * self.VELOCITY_FACTOR
+                    peak_velocity = mean_velocity * 1.3  # Estimate
+                    mpv = mean_velocity * 1.15  # Estimate
+                    
+                    # Power calculations (if load provided)
+                    if self.load_weight_kg > 0:
+                        mean_power = self.load_weight_kg * 9.81 * mean_velocity
+                        peak_power = self.load_weight_kg * 9.81 * peak_velocity
+                        mpv_power = self.load_weight_kg * 9.81 * mpv
+                    else:
+                        mean_power = 0.0
+                        peak_power = 0.0
+                        mpv_power = 0.0
+                    
+                    writer.writerow(['# VBT METRICS'])
+                    writer.writerow(['Mean Velocity (MV)', f"{mean_velocity:.3f}", 'm/s'])
+                    writer.writerow(['Peak Velocity (PV)', f"{peak_velocity:.3f}", 'm/s'])
+                    writer.writerow(['Mean Propulsive Velocity (MPV)', f"{mpv:.3f}", 'm/s'])
+                    writer.writerow(['Time to Peak', f"{time_to_peak:.3f}", 's'])
+                    writer.writerow(['Mean Power', f"{mean_power:.1f}", 'W'])
+                    writer.writerow(['Peak Power', f"{peak_power:.1f}", 'W'])
+                    writer.writerow(['MPV Power', f"{mpv_power:.1f}", 'W'])
+                    writer.writerow([])
+                
+                # Markers
+                writer.writerow(['# MARKERS'])
+                writer.writerow(['Marker', 'Time (s)', 'Magnitude (g)', 'Color'])
+                for name, m in self.markers.items():
+                    if m:
+                        t_rel = m['time'] - self.window_start_time
+                        writer.writerow([name, f"{t_rel:.4f}", f"{m['mag']:.4f}", colors[name]])
+                writer.writerow([])
+                
+                # Time series data
+                writer.writerow(['# TIME SERIES DATA'])
+                writer.writerow(['Time_Relative (s)', 'Magnitude (g)'])
+                for t, mag in zip(times_rel, self.window_data_mag):
+                    writer.writerow([f"{t:.4f}", f"{mag:.4f}"])
+            
+            print(f"💾 CSV: {csv_fname}")
+            
         except Exception as e:
-            print(f"⚠️  Screenshot error: {e}")
+            print(f"⚠️  Save error: {e}")
+            import traceback
+            traceback.print_exc()
     
     def validate_squat_from_markers(self):
         """Validates that markers form a valid squat pattern"""
@@ -720,8 +856,8 @@ LAST REP:
         # Calcola velocità media dalla spinta: baseline -> picco
         time_to_peak = peak['time'] - self.window_start_time
         delta_mag = peak['mag'] - self.baseline_value
-        # Formula VBT standard: delta accelerazione * g * fattore medio
-        mean_velocity = abs(delta_mag) * 9.81 * 0.5  # Conversione g -> m/s con media
+        # Formula VBT: delta accelerazione * g * fattore (FROM CONFIG)
+        mean_velocity = abs(delta_mag) * 9.81 * self.VELOCITY_FACTOR
         
         # Store rep
         self.rep_count += 1
@@ -755,14 +891,26 @@ LAST REP:
         
         # Soglie baseline
         baseline_lower = self.baseline_value * (1 - self.BASELINE_ZONE)
+        baseline_upper = self.baseline_value * (1 + self.BASELINE_ZONE)
         
         # === WINDOW MANAGEMENT ===
         
         # Apri finestra se baseline break + refractory rispettato + STD movimento
         if not self.window_active:
-            if mag_smooth < baseline_lower:
+            # Trigger verso il BASSO (squat, bench press - fase eccentrica)
+            trigger_down = mag_smooth < baseline_lower
+            
+            # Trigger verso l'ALTO (deadlift - inizio concentrico)
+            # Attivo solo per profilo deadlift
+            trigger_up = False
+            if self.profile == 'deadlift':
+                trigger_up = mag_smooth > baseline_upper
+            
+            if trigger_down or trigger_up:
                 if (current_time - self.last_rep_end_time) >= self.REFRACTORY_PERIOD:
                     if self.current_std >= self.MIN_MOVEMENT_STD:
+                        trigger_type = "DOWN" if trigger_down else "UP"
+                        print(f"🔔 Trigger {trigger_type} detected: {mag_smooth:.3f}g")
                         self.open_event_window(current_time, current_idx)
             return  # Non fare altro se finestra non attiva
         
@@ -856,12 +1004,100 @@ def start_plot_thread(monitor):
     
     return plot_thread
 
+def get_load_weight() -> float:
+    """Prompt user for load weight in kg"""
+    print("\n" + "="*70)
+    print("LOAD WEIGHT INPUT")
+    print("="*70)
+    print("\n⚖️  Enter the weight you're lifting (kg)")
+    print("   Examples: 20, 60, 100, 140")
+    print("   Press Enter to skip (power metrics will not be calculated)")
+    
+    while True:
+        weight_input = input("\nLoad weight (kg): ").strip()
+        
+        if not weight_input:
+            print("✅ No load weight specified. Power metrics will be 0.")
+            return 0.0
+        
+        try:
+            weight = float(weight_input)
+            if weight < 0:
+                print("⚠️  Weight cannot be negative. Try again.")
+                continue
+            if weight > 500:
+                print("⚠️  Weight seems unrealistic (>500kg). Try again.")
+                continue
+            
+            print(f"✅ Load weight set to: {weight:.1f} kg")
+            return weight
+            
+        except ValueError:
+            print("⚠️  Invalid input. Enter a number (e.g., 60)")
+
+def select_profile_interactive() -> str:
+    """Interactive profile selection menu"""
+    try:
+        config = VBTConfig("vbt_config.json")
+        profiles = config.list_profiles()
+        default_profile = config.config.get('default_profile', 'squat_speed')
+        
+        print("\n" + "="*70)
+        print("VBT PROFILE SELECTION")
+        print("="*70)
+        print("\n📋 Available Profiles:\n")
+        
+        profile_list = list(profiles.items())
+        for i, (name, desc) in enumerate(profile_list, 1):
+            default_marker = " [DEFAULT]" if name == default_profile else ""
+            print(f"   {i}. {name:20s} - {desc}{default_marker}")
+        
+        print(f"\n{'='*70}")
+        choice = input(f"\nSelect profile (1-{len(profile_list)}) or press Enter for default: ").strip()
+        
+        if not choice:
+            print(f"✅ Using default profile: {default_profile}")
+            return default_profile
+        
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(profile_list):
+                selected = profile_list[idx][0]
+                print(f"✅ Selected profile: {selected}")
+                return selected
+            else:
+                print(f"⚠️  Invalid choice. Using default: {default_profile}")
+                return default_profile
+        except ValueError:
+            print(f"⚠️  Invalid input. Using default: {default_profile}")
+            return default_profile
+            
+    except Exception as e:
+        print(f"⚠️  Error loading profiles: {e}")
+        print("   Using default profile: squat_speed")
+        return "squat_speed"
+
 def main():
     """Main entry point"""
     import warnings
+    import sys
     warnings.filterwarnings("ignore", category=RuntimeWarning)
     
-    monitor = CL837VBTMonitor()
+    # Parse command line args for profile selection
+    profile = None
+    if len(sys.argv) > 1:
+        # Profile specified via command line
+        profile = sys.argv[1]
+        print(f"\n🚀 Starting VBT Monitor with profile: {profile}")
+    else:
+        # Interactive menu
+        profile = select_profile_interactive()
+    
+    # Get load weight
+    load_weight = get_load_weight()
+    
+    monitor = CL837VBTMonitor(config_file="vbt_config.json", profile=profile)
+    monitor.load_weight_kg = load_weight
     
     try:
         # Start matplotlib in background
