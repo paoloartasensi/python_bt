@@ -130,17 +130,20 @@
     },
     
     "deadlift": {
-      "description": "Deadlift (concentric only)",
+      "description": "Deadlift (concentric-first movement with impact detection)",
       "magnitude_thresholds": {
-        "baseline_zone": 0.08,
+        "baseline_zone": 0.05,
         "min_depth_mag": 0.60,
-        "min_peak_mag": 1.20
+        "min_peak_mag": 1.30,
+        "impact_threshold": 1.80,
+        "_notes": "Calibrated from real data: baseline_zone 5% optimal for pull detection, min_peak_mag increased to 1.30 (observed lockout peaks 1.2-1.4g), impact_threshold 1.80g separates bar-floor contact (2.1-2.7g) from normal movement"
       },
       "temporal_windows": {
         "min_eccentric_window": 0.10,
         "max_concentric_window": 3.0,
         "min_concentric_duration": 0.20,
-        "refractory_period": 2.5
+        "refractory_period": 1.5,
+        "_notes": "Refractory period reduced to 1.5s based on observed rep spacing (1.0-1.5s between reps)"
       },
       "signal_processing": {
         "mag_smooth_window": 6,
@@ -156,7 +159,8 @@
       },
       "velocity_conversion": {
         "factor": 0.40,
-        "calibrated": false
+        "calibrated": false,
+        "notes": "Requires calibration with linear encoder for accurate velocity metrics"
       }
     }
   },
