@@ -211,8 +211,9 @@ class CL837UnifiedMonitor:
         
         try:
             print("Connecting...")
-            # LOW-LATENCY: reduced timeout for more responsive connections
-            self.client = BleakClient(target_device, timeout=10.0)
+            print("   (timeout: 20s - assicurati che il dispositivo sia vicino e non connesso ad altre app)")
+            # Aumentato timeout per connessioni più lente
+            self.client = BleakClient(target_device, timeout=20.0)
             await self.client.connect()
             
             if self.client.is_connected:
@@ -236,7 +237,9 @@ class CL837UnifiedMonitor:
                 return False
                 
         except Exception as e:
+            import traceback
             print(f"Connection error: {e}")
+            traceback.print_exc()
             return False
 
     async def discover_services(self):

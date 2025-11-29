@@ -24,6 +24,9 @@ class CL837VBTMonitor:
     """Minimalist VBT monitor with Output Sports style bar chart"""
     
     def __init__(self, config_file: str = "vbt_config.json", profile: str = None):
+        # Save profile name
+        self.profile = profile if profile else 'default'
+        
         # Load VBT configuration
         try:
             self.vbt_config = VBTConfig(config_file)
