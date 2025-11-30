@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-CL837 VBT Monitor - Output Sports Style
-Real-time velocity bar chart with color-coded load zones
+CL837 VBT Monitor - Translated from Dart vbt_test
+Real-time velocity bar chart with rep capture system
+Based on RepCaptureService from Flutter implementation
 """
 
 import asyncio
@@ -10,48 +11,476 @@ import struct
 import traceback
 import threading
 import winsound
+import math
 import numpy as np
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum, auto
+from typing import List, Optional, Callable
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from bleak import BleakClient, BleakScanner
-from vbt_config import VBTConfig
+
+
+# =============================================================================
+# DATA CLASSES (translated from Dart)
+# =============================================================================
+
+@dataclass
+class AccelerometerData:
+    """Single accelerometer sample"""
+    ax: float  # X acceleration (g)
+    ay: float  # Y acceleration (g)
+    az: float  # Z acceleration (g)
+    timestamp: float  # Timestamp in seconds
+    
+    @property
+    def magnitude(self) -> float:
+        """Calculate acceleration magnitude"""
+        return math.sqrt(self.ax**2 + self.ay**2 + self.az**2)
+
+
+@dataclass
+class CapturedRep:
+    """Captured repetition with VBT metrics
+    
+    Translated from Dart CapturedRep class.
+    Contains all info about a detected rep including velocity calculation.
+    """
+    rep_number: int
+    velocity: float  # Mean velocity (m/s)
+    trigger_time: float  # Time when movement triggered
+    trigger_index: int  # Sample index of trigger
+    peak_index: int  # Sample index of peak magnitude
+    peak_magnitude: float  # Maximum magnitude during rep (g)
+    baseline: float  # Baseline magnitude used (g)
+    concentric_duration_ms: int  # Duration in milliseconds
+    samples: List[AccelerometerData] = field(default_factory=list)
+    velocity_loss: float = 0.0  # VL% compared to vBest
+    
+    def __str__(self) -> str:
+        return (f"Rep #{self.rep_number}: {self.velocity:.3f} m/s, "
+                f"VL={self.velocity_loss:.1f}%, "
+                f"duration={self.concentric_duration_ms}ms, "
+                f"peak={self.peak_magnitude:.3f}g")
+
+
+class RepCaptureState(Enum):
+    """States of the rep capture service"""
+    IDLE = auto()       # Waiting to start
+    MONITORING = auto()  # Active monitoring, waiting for trigger
+    CAPTURING = auto()   # Capture in progress (post-trigger)
+    PROCESSING = auto()  # Processing captured data
+
+
+# =============================================================================
+# REP CAPTURE SERVICE (translated from Dart)
+# =============================================================================
+
+class RepCaptureService:
+    """Service for capturing reps using accelerometer data
+    
+    Translated from Dart RepCaptureService.
+    
+    Detection algorithm:
+    1. Maintain a pre-buffer of samples (500ms default)
+    2. Trigger when Y-axis breaks below baseline - threshold
+    3. Capture samples for post_trigger_ms after trigger
+    4. Find peak magnitude in captured window
+    5. Calculate velocity by integrating acceleration from trigger to peak
+    6. Validate rep with multiple filters
+    """
+    
+    def __init__(
+        self,
+        sample_rate: int = 50,
+        activation_threshold: float = 0.05,  # g below baseline to trigger
+        pre_buffer_ms: int = 500,  # Pre-trigger buffer
+        post_trigger_ms: int = 2000,  # Post-trigger capture window
+        position_tolerance: float = 0.5,  # Position tolerance for validation
+        min_velocity: float = 0.05,  # Minimum velocity to accept rep
+        min_duration_ms: int = 100,  # Minimum concentric duration
+    ):
+        self.sample_rate = sample_rate
+        self.activation_threshold = activation_threshold
+        self.pre_buffer_ms = pre_buffer_ms
+        self.post_trigger_ms = post_trigger_ms
+        self.position_tolerance = position_tolerance
+        self.min_velocity = min_velocity
+        self.min_duration_ms = min_duration_ms
+        
+        # Calculate buffer sizes
+        self._pre_buffer_size = int((pre_buffer_ms / 1000) * sample_rate)
+        self._post_trigger_samples = int((post_trigger_ms / 1000) * sample_rate)
+        
+        # State
+        self._state = RepCaptureState.IDLE
+        self._pre_buffer: deque = deque(maxlen=self._pre_buffer_size)
+        self._capture_buffer: List[AccelerometerData] = []
+        self._trigger_index = 0
+        self._samples_since_trigger = 0
+        
+        # Baseline (calibrated)
+        self._baseline: float = 1.0  # Default magnitude at rest
+        self._baseline_y: float = -1.0  # Default Y at rest (gravity)
+        
+        # Bounce filter (filtro rimbalzi)
+        # Tracks if eccentric phase was detected before trigger
+        self._was_above_baseline: bool = False
+        
+        # Results
+        self._rep_count = 0
+        self._v_best: float = 0.0
+        self._captured_reps: List[CapturedRep] = []
+        
+        # Callback for captured reps
+        self._on_rep_captured: Optional[Callable[[CapturedRep], None]] = None
+        
+        print(f"📊 RepCaptureService initialized:")
+        print(f"   Sample rate: {sample_rate} Hz")
+        print(f"   Activation threshold: {activation_threshold}g")
+        print(f"   Pre-buffer: {pre_buffer_ms}ms ({self._pre_buffer_size} samples)")
+        print(f"   Post-trigger: {post_trigger_ms}ms ({self._post_trigger_samples} samples)")
+    
+    @property
+    def state(self) -> RepCaptureState:
+        return self._state
+    
+    @property
+    def v_best(self) -> float:
+        return self._v_best
+    
+    @property
+    def rep_count(self) -> int:
+        return self._rep_count
+    
+    @property
+    def captured_reps(self) -> List[CapturedRep]:
+        return self._captured_reps.copy()
+    
+    def set_on_rep_captured(self, callback: Callable[[CapturedRep], None]):
+        """Set callback for when a rep is captured"""
+        self._on_rep_captured = callback
+    
+    def set_baseline(self, baseline: float, baseline_y: float = -1.0):
+        """Set calibrated baseline values
+        
+        Args:
+            baseline: Magnitude at rest (typically ~1g)
+            baseline_y: Y-axis value at rest (typically -1g due to gravity)
+        """
+        self._baseline = baseline
+        self._baseline_y = baseline_y
+        print(f"📊 Baseline set: magnitude={baseline:.4f}g, Y={baseline_y:.4f}g")
+    
+    def start_monitoring(self):
+        """Start monitoring for rep triggers"""
+        if self._state != RepCaptureState.IDLE:
+            print("⚠️ Already monitoring")
+            return
+        
+        self._state = RepCaptureState.MONITORING
+        self._pre_buffer.clear()
+        print("🎯 Monitoring started - waiting for movement...")
+    
+    def stop_monitoring(self):
+        """Stop monitoring"""
+        self._state = RepCaptureState.IDLE
+        self._pre_buffer.clear()
+        self._capture_buffer.clear()
+        print("⏹️ Monitoring stopped")
+    
+    def reset(self):
+        """Reset service state"""
+        self._state = RepCaptureState.IDLE
+        self._pre_buffer.clear()
+        self._capture_buffer.clear()
+        self._rep_count = 0
+        self._v_best = 0.0
+        self._captured_reps.clear()
+        print("🔄 RepCaptureService reset")
+    
+    def process_sample(self, sample: AccelerometerData):
+        """Process incoming accelerometer sample
+        
+        This is the main entry point called for each new sample.
+        Routes to appropriate handler based on current state.
+        """
+        if self._state == RepCaptureState.IDLE:
+            return
+        elif self._state == RepCaptureState.MONITORING:
+            self._handle_monitoring_state(sample)
+        elif self._state == RepCaptureState.CAPTURING:
+            self._handle_capturing_state(sample)
+    
+    def _handle_monitoring_state(self, sample: AccelerometerData):
+        """Handle sample during monitoring state
+        
+        Adds to pre-buffer and checks for trigger condition.
+        Trigger: Y < baseline_y - threshold (movement upward)
+        
+        Includes bounce filter to avoid false triggers after eccentric phase.
+        """
+        # Add to pre-buffer
+        self._pre_buffer.append(sample)
+        
+        # === BOUNCE FILTER (filtro rimbalzi) ===
+        # Se Y rompe SOPRA baseline → segnala fase eccentrica
+        if sample.ay > self._baseline_y + 0.05:
+            self._was_above_baseline = True
+        
+        # Reset flag quando Y torna stabile a baseline
+        if abs(sample.ay - self._baseline_y) < 0.03:
+            self._was_above_baseline = False
+        
+        # Check trigger condition:
+        # Y more negative than baseline_y - threshold indicates upward acceleration
+        trigger_threshold = self._baseline_y - self.activation_threshold
+        
+        if sample.ay < trigger_threshold:
+            if self._was_above_baseline:
+                # ❌ Era preceduta da eccentrica → è un RIMBALZO
+                print(f"⏭️ Rimbalzo ignorato (Y={sample.ay:.3f}g, preceduto da eccentrica)")
+                self._was_above_baseline = False  # Reset
+            else:
+                # ✅ VERA CONCENTRICA - TRIGGER!
+                print(f"🎯 TRIGGER! Y={sample.ay:.3f}g < threshold={trigger_threshold:.3f}g")
+                self._start_capture(sample)
+    
+    def _start_capture(self, trigger_sample: AccelerometerData):
+        """Start capture sequence after trigger detected"""
+        self._state = RepCaptureState.CAPTURING
+        
+        # Copy pre-buffer to capture buffer
+        self._capture_buffer = list(self._pre_buffer)
+        self._trigger_index = len(self._capture_buffer) - 1
+        self._samples_since_trigger = 0
+        
+        print(f"📹 Capture started with {len(self._capture_buffer)} pre-buffer samples")
+    
+    def _handle_capturing_state(self, sample: AccelerometerData):
+        """Handle sample during capturing state
+        
+        Adds samples until post-trigger window complete.
+        """
+        self._capture_buffer.append(sample)
+        self._samples_since_trigger += 1
+        
+        # Check if capture window complete
+        if self._samples_since_trigger >= self._post_trigger_samples:
+            self._finish_capture()
+    
+    def _finish_capture(self):
+        """Finish capture and process data
+        
+        Finds peak, calculates velocity, validates rep.
+        """
+        self._state = RepCaptureState.PROCESSING
+        samples = self._capture_buffer
+        
+        if len(samples) < 10:
+            print("⚠️ Not enough samples for analysis")
+            self._state = RepCaptureState.MONITORING
+            self._pre_buffer.clear()
+            self._capture_buffer.clear()
+            return
+        
+        # Find peak magnitude after trigger
+        start_idx = self._trigger_index
+        peak_idx = start_idx
+        max_mag = 0.0
+        
+        for i in range(start_idx, len(samples)):
+            if samples[i].magnitude > max_mag:
+                max_mag = samples[i].magnitude
+                peak_idx = i
+        
+        # Calculate concentric duration
+        dt = 1.0 / self.sample_rate
+        duration_s = (peak_idx - start_idx) * dt
+        duration_ms = int(duration_s * 1000)
+        
+        print(f"📊 Peak found at index {peak_idx}, magnitude={max_mag:.3f}g, duration={duration_ms}ms")
+        
+        # Calculate velocity by integrating acceleration
+        velocity = self._calculate_velocity(samples, start_idx, peak_idx)
+        
+        # Calculate statistics for validation
+        stats = self._calculate_stats(samples[start_idx:peak_idx+1] if peak_idx > start_idx else samples)
+        
+        # === VALIDATION FILTERS ===
+        valid = True
+        reject_reason = ""
+        
+        # Filter 1: Minimum velocity
+        if velocity < self.min_velocity:
+            valid = False
+            reject_reason = f"velocity too low ({velocity:.3f} < {self.min_velocity})"
+        
+        # Filter 2: Minimum duration
+        elif duration_ms < self.min_duration_ms:
+            valid = False
+            reject_reason = f"duration too short ({duration_ms}ms < {self.min_duration_ms}ms)"
+        
+        # Filter 3: Zero crossings (too many = irregular movement)
+        elif stats['zero_crossings'] > 10:
+            valid = False
+            reject_reason = f"irregular movement (zero_crossings={stats['zero_crossings']})"
+        
+        # Filter 4: Negative velocity (captured eccentric instead of concentric)
+        elif velocity < 0:
+            valid = False
+            reject_reason = f"negative velocity (eccentric captured)"
+        
+        if not valid:
+            print(f"❌ Rep rejected: {reject_reason}")
+            self._state = RepCaptureState.MONITORING
+            self._pre_buffer.clear()
+            self._capture_buffer.clear()
+            return
+        
+        # === VALID REP ===
+        self._rep_count += 1
+        
+        # Update vBest
+        if velocity > self._v_best:
+            self._v_best = velocity
+        
+        # Calculate velocity loss
+        vl = ((self._v_best - velocity) / self._v_best * 100) if self._v_best > 0 else 0.0
+        
+        # Create CapturedRep
+        captured_rep = CapturedRep(
+            rep_number=self._rep_count,
+            velocity=velocity,
+            trigger_time=samples[start_idx].timestamp if start_idx < len(samples) else 0,
+            trigger_index=start_idx,
+            peak_index=peak_idx,
+            peak_magnitude=max_mag,
+            baseline=self._baseline,
+            concentric_duration_ms=duration_ms,
+            samples=list(samples),
+            velocity_loss=vl,
+        )
+        
+        self._captured_reps.append(captured_rep)
+        print(f"✅ {captured_rep}")
+        
+        # Callback
+        if self._on_rep_captured:
+            self._on_rep_captured(captured_rep)
+        
+        # Reset for next rep
+        self._pre_buffer.clear()
+        self._capture_buffer.clear()
+        self._state = RepCaptureState.MONITORING
+        
+        print("🔄 Ready for next rep...")
+    
+    def _calculate_velocity(
+        self,
+        samples: List[AccelerometerData],
+        start_index: int,
+        end_index: int
+    ) -> float:
+        """Calculate velocity by integrating net acceleration
+        
+        v = ∫(a - baseline) dt
+        
+        Uses trapezoidal integration.
+        Sign determined by Y axis:
+        - Y at rest = -1g (gravity)
+        - Y more negative than baseline = movement DOWN (negative)
+        - Y less negative than baseline = movement UP (positive)
+        """
+        if start_index >= end_index or end_index >= len(samples):
+            return 0.0
+        
+        dt = 1.0 / self.sample_rate
+        velocity = 0.0
+        baseline_y = self._baseline_y
+        
+        for i in range(start_index + 1, end_index + 1):
+            # Net magnitude (remove gravitational baseline) in m/s²
+            mag_net_current = (samples[i].magnitude - self._baseline) * 9.81
+            mag_net_prev = (samples[i-1].magnitude - self._baseline) * 9.81
+            
+            # Determine sign based on Y axis:
+            # With negative Y at rest (~-1g):
+            # - Y MORE negative than baseline (e.g., -1.5g) → acceleration UP → positive
+            # - Y LESS negative than baseline (e.g., -0.5g) → acceleration DOWN → negative
+            sign_current = 1.0 if samples[i].ay < baseline_y else -1.0
+            sign_prev = 1.0 if samples[i-1].ay < baseline_y else -1.0
+            
+            # Acceleration with sign
+            a_current = sign_current * mag_net_current
+            a_prev = sign_prev * mag_net_prev
+            
+            # Trapezoidal integration
+            avg_accel = (a_current + a_prev) / 2
+            velocity += avg_accel * dt
+        
+        # Concentric velocity should be positive
+        return velocity
+    
+    def _calculate_stats(self, samples: List[AccelerometerData]) -> dict:
+        """Calculate statistics on sample window
+        
+        Returns dict with:
+        - std_dev: Standard deviation of magnitude
+        - avg_jerk: Average jerk (derivative of acceleration)
+        - zero_crossings: Number of jerk sign changes
+        """
+        if len(samples) < 2:
+            return {'std_dev': 0, 'avg_jerk': 0, 'zero_crossings': 0}
+        
+        # Standard deviation of magnitude
+        magnitudes = [s.magnitude for s in samples]
+        mean = sum(magnitudes) / len(magnitudes)
+        variance = sum((m - mean)**2 for m in magnitudes) / len(magnitudes)
+        std_dev = math.sqrt(variance)
+        
+        # Jerk (derivative of acceleration)
+        dt = 1.0 / self.sample_rate
+        jerks = []
+        for i in range(1, len(samples)):
+            jerk = (samples[i].magnitude - samples[i-1].magnitude) / dt
+            jerks.append(jerk)
+        
+        avg_jerk = sum(abs(j) for j in jerks) / len(jerks) if jerks else 0
+        
+        # Zero crossings of jerk
+        zero_crossings = 0
+        for i in range(1, len(jerks)):
+            if (jerks[i] > 0 and jerks[i-1] < 0) or (jerks[i] < 0 and jerks[i-1] > 0):
+                zero_crossings += 1
+        
+        return {
+            'std_dev': std_dev,
+            'avg_jerk': avg_jerk,
+            'zero_crossings': zero_crossings
+        }
+
+
+# =============================================================================
+# VBT MONITOR (combines BLE + RepCaptureService + UI)
+# =============================================================================
 
 class CL837VBTMonitor:
-    """Minimalist VBT monitor with Output Sports style bar chart"""
+    """VBT Monitor with CL837 BLE connection and bar chart display
     
-    def __init__(self, config_file: str = "vbt_config.json", profile: str = None):
+    Integrates:
+    - BLE connection via Chileaf protocol
+    - RepCaptureService for rep detection
+    - Matplotlib bar chart for velocity display
+    """
+    
+    def __init__(self, profile: str = None):
         # Save profile name
         self.profile = profile if profile else 'default'
-        
-        # Load VBT configuration
-        try:
-            self.vbt_config = VBTConfig(config_file)
-            
-            if profile:
-                self.vbt_config.set_profile(profile)
-            
-            # Get parameters
-            params = self.vbt_config.get_params()
-            
-            # Validate before using
-            if not self.vbt_config.validate_params(params):
-                raise ValueError("Invalid VBT configuration parameters")
-            
-            print("\n" + "="*70)
-            print("VBT CONFIGURATION LOADED")
-            print("="*70)
-            self.vbt_config.print_current_config()
-            
-        except FileNotFoundError:
-            print("⚠️  Config file not found. Using default hardcoded values.")
-            params = self._get_default_params()
-        except Exception as e:
-            print(f"⚠️  Error loading config: {e}. Using default hardcoded values.")
-            params = self._get_default_params()
         
         # BLE Connection
         self.client = None
@@ -66,98 +495,44 @@ class CL837VBTMonitor:
         self.CHILEAF_CMD_ACCELEROMETER = 0x0C
         self.CHILEAF_CONVERSION_FACTOR = 4096.0
         
-        # Data buffers (small - only for current rep)
+        # Rep Capture Service
+        self.rep_service = RepCaptureService(
+            sample_rate=50,
+            activation_threshold=0.05,  # 0.05g below baseline
+            pre_buffer_ms=500,  # 500ms pre-trigger
+            post_trigger_ms=2000,  # 2 seconds post-trigger
+        )
+        self.rep_service.set_on_rep_captured(self._on_rep_captured)
+        
+        # Data buffers for oscilloscope display
         self.max_samples = 150  # ~3 seconds at 50Hz
         self.magnitude_data = deque(maxlen=self.max_samples)
         self.timestamps_data = deque(maxlen=self.max_samples)
-        self.velocity_data = deque(maxlen=self.max_samples)
-        
-        # VBT State Machine - FROM CONFIG
-        self.BASELINE_ZONE = params['BASELINE_ZONE']
-        self.MIN_DEPTH_MAG = params['MIN_DEPTH_MAG']
-        self.MIN_PEAK_MAG = params['MIN_PEAK_MAG']
-        
-        self.MIN_ECCENTRIC_WINDOW = params['MIN_ECCENTRIC_WINDOW']
-        self.MAX_CONCENTRIC_WINDOW = params['MAX_CONCENTRIC_WINDOW']
-        self.MIN_CONCENTRIC_DURATION = params['MIN_CONCENTRIC_DURATION']
-        self.REFRACTORY_PERIOD = params['REFRACTORY_PERIOD']
-        
-        self.MAG_SMOOTH_WINDOW = params['MAG_SMOOTH_WINDOW']
-        self.mag_smooth_buffer = deque(maxlen=self.MAG_SMOOTH_WINDOW)
-        
-        # Variance/STD analysis to distinguish movement from noise
-        self.STD_WINDOW = params['STD_WINDOW']
-        self.mag_std_buffer = deque(maxlen=self.STD_WINDOW)
-        self.MIN_MOVEMENT_STD = params['MIN_MOVEMENT_STD']
-        self.MAX_NOISE_STD = params['MAX_NOISE_STD']
-        self.current_std = 0.0
-        
-        # Event Window System - FROM CONFIG
-        self.WINDOW_DURATION = params['WINDOW_DURATION']
-        self.PRE_BUFFER_SIZE = params['PRE_BUFFER_SIZE']
-        self.pre_buffer_mag = deque(maxlen=self.PRE_BUFFER_SIZE)
-        self.pre_buffer_time = deque(maxlen=self.PRE_BUFFER_SIZE)
-        self.pre_buffer_idx = deque(maxlen=self.PRE_BUFFER_SIZE)
-        self.window_active = False
-        self.window_start_time = None
-        self.window_start_idx = None
-        self.window_data_mag = []  # Magnitudes in window
-        self.window_data_time = []  # Timestamps in window
-        self.window_data_idx = []   # Indices in window
-        
-        # Markers found in window
-        self.markers = {
-            'counter_movement': None,  # Inverted cusp preparation
-            'bottom': None,             # Absolute minimum
-            'peak': None,               # Maximum concentric peak
-            'deceleration': None        # Minimum after peak (drop)
-        }
-        
-        # Refractory period
-        self.last_rep_end_time = -self.REFRACTORY_PERIOD
-        
-        # Beep timing control
-        self.last_beep_time = 0
         
         # Baseline calibration
         self.baseline_calculated = False
         self.baseline_samples = []
-        self.BASELINE_SAMPLES_COUNT = 25
-        self.baseline_value = 1.0
+        self.BASELINE_SAMPLES_COUNT = 50  # 1 second at 50Hz
         
-        # Velocity conversion factor - FROM CONFIG
-        self.VELOCITY_FACTOR = params['VELOCITY_FACTOR']
-        self.VELOCITY_CALIBRATED = params['VELOCITY_CALIBRATED']
-        if not self.VELOCITY_CALIBRATED:
-            print("\n⚠️  WARNING: Velocity conversion factor NOT calibrated!")
-            print(f"   Current factor: {self.VELOCITY_FACTOR:.2f}")
-            print("   Velocity metrics may not be accurate.")
-            print("   Calibrate with linear encoder for ground truth.\n")
-        
-        # Load weight (kg) - for power calculations
-        self.load_weight_kg = 0.0  # Will be set by user input
-        
-        # Real-time velocity integration
-        self.current_velocity = 0.0
-        
-        # VBT Results - History of reps
+        # VBT Results
         self.rep_velocities = []  # List of mean velocities
         self.rep_numbers = []     # List of rep numbers
-        self.rep_count = 0
         
         # Current rep metrics (for display)
-        self.last_mean_velocity = 0.0
-        self.last_peak_velocity = 0.0
-        self.last_mpv = 0.0
+        self.last_velocity = 0.0
         
         # Statistics
         self.sample_count = 0
         self.frame_count = 0
         self.start_time = time.time()
         
+        # Load weight (kg)
+        self.load_weight_kg = 0.0
+        
         # Matplotlib
         self.fig = None
         self.ax = None
+        self.ax_scope = None
         self.animation_obj = None
         self.plot_ready = False
         self.monitoring_active = False
@@ -167,27 +542,24 @@ class CL837VBTMonitor:
         self.countdown_start_time = None
         self.countdown_duration = 3.0
         self.countdown_text = None
+        self.last_countdown_num = 0  # Track last beep
+        
+        print("\n" + "="*70)
+        print("VBT MONITOR - Dart Translation")
+        print("="*70)
     
-    def _get_default_params(self) -> dict:
-        """Fallback default parameters if config file not available"""
-        return {
-            'BASELINE_ZONE': 0.06,
-            'MIN_DEPTH_MAG': 0.60,
-            'MIN_PEAK_MAG': 1.05,
-            'MIN_ECCENTRIC_WINDOW': 0.30,
-            'MAX_CONCENTRIC_WINDOW': 2.5,
-            'MIN_CONCENTRIC_DURATION': 0.15,
-            'REFRACTORY_PERIOD': 0.8,
-            'MAG_SMOOTH_WINDOW': 5,
-            'STD_WINDOW': 20,
-            'MIN_MOVEMENT_STD': 0.015,
-            'MAX_NOISE_STD': 0.008,
-            'WINDOW_DURATION': 2.5,
-            'PRE_BUFFER_SIZE': 25,
-            'VELOCITY_FACTOR': 0.5,
-            'VELOCITY_CALIBRATED': False
-        }
-
+    def _on_rep_captured(self, rep: CapturedRep):
+        """Callback when rep is captured"""
+        self.rep_velocities.append(rep.velocity)
+        self.rep_numbers.append(rep.rep_number)
+        self.last_velocity = rep.velocity
+        
+        # Beep on rep detection
+        try:
+            winsound.Beep(1000, 100)  # 1kHz, 100ms
+        except:
+            pass
+    
     async def scan_and_connect(self):
         """Scan and connect to CL837"""
         while True:
@@ -223,13 +595,14 @@ class CL837VBTMonitor:
             
             print(f"\n🔵 Connecting to {self.device.name}...")
             try:
-                self.client = BleakClient(self.device.address, timeout=10.0)
+                self.client = BleakClient(self.device.address, timeout=20.0)
                 await self.client.connect()
                 self.is_connected = True
                 print(f"✅ Connected to {self.device.name}")
                 return True
             except Exception as e:
                 print(f"❌ Connection failed: {e}")
+                traceback.print_exc()
                 retry = input("Retry? (y/n): ").strip().lower()
                 if retry != 'y':
                     return False
@@ -266,27 +639,26 @@ class CL837VBTMonitor:
         return True
 
     def setup_plot(self):
-        """Initialize Output Sports style bar chart + oscilloscope"""
+        """Initialize bar chart + oscilloscope display"""
         print("🎨 Setting up VBT display...")
         
         # Create 2 subplots: bar chart (top) + oscilloscope (bottom)
         self.fig, (self.ax, self.ax_scope) = plt.subplots(2, 1, figsize=(12, 10), 
                                                            gridspec_kw={'height_ratios': [1, 2]})
-        self.fig.suptitle("VBT MONITOR - Output Sports Style", fontsize=18, fontweight='bold')
+        self.fig.suptitle("VBT MONITOR - Rep Capture", fontsize=18, fontweight='bold')
         
         # SUBPLOT 1: Bar chart (top)
         self.ax.set_xlabel("Repetition Number", fontsize=14, fontweight='bold')
         self.ax.set_ylabel("Mean Velocity (m/s)", fontsize=14, fontweight='bold')
-        self.ax.set_ylim(0, 1.5)  # Typical squat velocity range
+        self.ax.set_ylim(0, 1.5)
         self.ax.grid(True, alpha=0.3, axis='y')
         
-        # Add velocity zone reference lines (Output Sports style)
+        # Velocity zone reference lines
         self.ax.axhspan(0.0, 0.15, color='red', alpha=0.1, label='Max Strength (>90% 1RM)')
         self.ax.axhspan(0.15, 0.30, color='orange', alpha=0.1, label='Strength (80-90% 1RM)')
         self.ax.axhspan(0.30, 0.50, color='yellow', alpha=0.1, label='Strength-Speed (60-80% 1RM)')
         self.ax.axhspan(0.50, 1.5, color='green', alpha=0.1, label='Speed/Power (<60% 1RM)')
         
-        # Legend
         self.ax.legend(loc='upper right', fontsize=9)
         
         # Status text
@@ -319,7 +691,7 @@ class CL837VBTMonitor:
         print("✅ Display configured")
 
     def update_plot(self, frame):
-        """Update bar chart + oscilloscope with latest data"""
+        """Update bar chart + oscilloscope"""
         # Update countdown if active
         if self.countdown_active and self.countdown_start_time:
             elapsed = time.time() - self.countdown_start_time
@@ -330,6 +702,16 @@ class CL837VBTMonitor:
                 self.countdown_text.set_text(f"{countdown_num}")
                 self.countdown_text.set_alpha(0.95)
                 self.countdown_text.get_bbox_patch().set_alpha(0.9)
+                
+                # Beep on each countdown number change
+                if countdown_num != self.last_countdown_num:
+                    self.last_countdown_num = countdown_num
+                    try:
+                        # Different frequency for each number
+                        freq = 600 + (3 - countdown_num) * 200  # 600, 800, 1000 Hz
+                        winsound.Beep(freq, 150)
+                    except:
+                        pass
             else:
                 self.countdown_active = False
                 self.countdown_text.set_alpha(0.0)
@@ -383,7 +765,7 @@ class CL837VBTMonitor:
             self.ax.set_xlim(0.5, max(self.rep_numbers) + 0.5)
         
         # Update status text
-        status = self.get_status_text()
+        status = self._get_status_text()
         self.status_text = self.ax.text(0.02, 0.98, status, transform=self.ax.transAxes,
                                         fontsize=11, verticalalignment='top',
                                         fontfamily='monospace',
@@ -391,738 +773,241 @@ class CL837VBTMonitor:
         
         # === UPDATE OSCILLOSCOPE (BOTTOM) ===
         self.ax_scope.clear()
-        self.ax_scope.set_title("Real-Time Magnitude + State Machine", fontweight='bold', fontsize=12)
+        self.ax_scope.set_title("Real-Time Magnitude + State", fontweight='bold', fontsize=12)
         self.ax_scope.set_xlabel("Samples (last 150)", fontsize=10)
         self.ax_scope.set_ylabel("Magnitude (g)", fontsize=10)
         self.ax_scope.grid(True, alpha=0.3)
         
         if len(self.magnitude_data) > 0:
             mag_list = list(self.magnitude_data)
-            vel_list = list(self.velocity_data)
-            indices = list(range(len(mag_list)))
+            x_data = list(range(len(mag_list)))
             
-            # Plot magnitude
-            self.ax_scope.plot(indices, mag_list, 'purple', linewidth=2.5, alpha=0.9, label='Magnitude')
+            # Dynamic Y limits
+            min_mag = min(mag_list) - 0.1
+            max_mag = max(mag_list) + 0.1
+            self.ax_scope.set_ylim(max(0.3, min_mag), max(1.5, max_mag))
             
-            # Reference lines
-            self.ax_scope.axhline(y=1.0, color='blue', linestyle='--', linewidth=1.5, alpha=0.5, label='Baseline (1g)')
+            # Plot magnitude line
+            self.ax_scope.plot(x_data, mag_list, 'purple', linewidth=2, alpha=0.8, label='Magnitude')
             
-            # Highlight window active with background color
-            if self.window_active:
-                self.ax_scope.axhspan(0, 4, color='blue', alpha=0.05, label='WINDOW ACTIVE')
-            
-            # Y-axis FISSO 0-4g (non adattivo)
-            self.ax_scope.set_ylim(0, 4.0)
-            
-            # Update X-axis
-            if indices:
-                self.ax_scope.set_xlim(0, max(self.max_samples, len(indices)))
-            
-            # Add baseline zones
+            # Draw baseline reference
             if self.baseline_calculated:
-                baseline_upper = self.baseline_value * (1 + self.BASELINE_ZONE)
-                baseline_lower = self.baseline_value * (1 - self.BASELINE_ZONE)
-                self.ax_scope.axhline(y=baseline_upper, color='red', linestyle=':', linewidth=1, alpha=0.3)
-                self.ax_scope.axhline(y=baseline_lower, color='green', linestyle=':', linewidth=1, alpha=0.3)
-                self.ax_scope.axhline(y=self.MIN_DEPTH_MAG, color='orange', linestyle='--', linewidth=1.5, alpha=0.6, label=f'Min Depth ({self.MIN_DEPTH_MAG}g)')
-                self.ax_scope.axhline(y=self.MIN_PEAK_MAG, color='cyan', linestyle='--', linewidth=1.5, alpha=0.6, label=f'Min Peak ({self.MIN_PEAK_MAG}g)')
+                baseline = self.rep_service._baseline
+                self.ax_scope.axhline(y=baseline, color='blue', linestyle='--', 
+                                      linewidth=1.5, alpha=0.7, label=f'Baseline ({baseline:.3f}g)')
+                
+                # Draw trigger threshold
+                threshold = self.rep_service._baseline_y - self.rep_service.activation_threshold
+                # Note: threshold is for Y-axis, not magnitude, but we show it as reference
             
-            # Add info text
-            current_vel = vel_list[-1] if vel_list else 0.0
-            current_mag = mag_list[-1] if mag_list else 0.0
+            # State indicator
+            state = self.rep_service.state
+            state_colors = {
+                RepCaptureState.IDLE: 'gray',
+                RepCaptureState.MONITORING: 'green',
+                RepCaptureState.CAPTURING: 'red',
+                RepCaptureState.PROCESSING: 'orange'
+            }
+            state_color = state_colors.get(state, 'gray')
+            self.ax_scope.text(0.98, 0.98, f"State: {state.name}", 
+                              transform=self.ax_scope.transAxes,
+                              ha='right', va='top',
+                              fontsize=10, fontweight='bold',
+                              color=state_color,
+                              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
             
-            # Indicatore movimento basato su STD
-            if self.current_std >= self.MIN_MOVEMENT_STD:
-                movement_indicator = "🔴 MOVING"
-            elif self.current_std <= self.MAX_NOISE_STD:
-                movement_indicator = "🟢 STABLE"
-            else:
-                movement_indicator = "🟡 TRANSITION"
-            
-            # Window status
-            window_status = "🔵 WINDOW ACTIVE" if self.window_active else "⏳ WAITING"
-            
-            info_text = f"{window_status} | Mag: {current_mag:.3f}g | Vel: {current_vel:.3f} m/s\nSTD: {self.current_std:.4f}g {movement_indicator}"
-            info_color = 'blue' if self.window_active else 'gray'
-            self.ax_scope.text(0.02, 0.98, info_text, transform=self.ax_scope.transAxes,
-                              fontsize=10, verticalalignment='top', fontweight='bold',
-                              color=info_color,
-                              bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8))
-            
-            self.ax_scope.legend(loc='upper right', fontsize=8)
+            self.ax_scope.legend(loc='upper left', fontsize=8)
         
-        return [self.status_text, self.countdown_text]
-
-    def get_status_text(self):
+        self.frame_count += 1
+        return []
+    
+    def _get_status_text(self) -> str:
         """Generate status text for display"""
         elapsed = time.time() - self.start_time
+        rate = self.sample_count / elapsed if elapsed > 0 else 0
         
-        if not self.baseline_calculated:
-            status = "🔄 CALIBRATING..."
-        elif self.window_active:
-            window_elapsed = time.time() - self.window_start_time
-            status = f"🔵 WINDOW: {window_elapsed:.1f}s / {self.WINDOW_DURATION:.1f}s"
-        else:
-            status = "⏳ WAITING FOR REP..."
+        v_best = self.rep_service.v_best
+        rep_count = self.rep_service.rep_count
         
-        # Velocity Loss calculation
-        if len(self.rep_velocities) >= 2:
-            vl_percent = ((self.rep_velocities[0] - self.rep_velocities[-1]) / self.rep_velocities[0]) * 100
-            vl_text = f"VL: {vl_percent:.1f}%"
-            if vl_percent > 20:
-                vl_text += " ⚠️"
-            elif vl_percent > 10:
-                vl_text += " ⚡"
-            else:
-                vl_text += " ✅"
-        else:
-            vl_text = "VL: --"
+        # Calculate VL% for last rep
+        vl = 0.0
+        if self.rep_velocities and v_best > 0:
+            vl = ((v_best - self.rep_velocities[-1]) / v_best * 100)
         
-        text = f"""STATUS: {status}
-REPS: {self.rep_count}
-TIME: {elapsed:.0f}s
-{vl_text}
-
-LAST REP:
-  MV: {self.last_mean_velocity:.3f} m/s
-  PV: {self.last_peak_velocity:.3f} m/s
-  MPV: {self.last_mpv:.3f} m/s
-"""
-        return text
-
-    def parse_chileaf_data(self, data):
-        """Parse Chileaf accelerometer frame"""
+        lines = [
+            f"Device: {self.device.name if self.device else 'N/A'}",
+            f"Weight: {self.load_weight_kg:.0f} kg",
+            f"",
+            f"Reps: {rep_count}",
+            f"V Best: {v_best:.3f} m/s",
+            f"Last V: {self.last_velocity:.3f} m/s",
+            f"VL%: {vl:.1f}%",
+            f"",
+            f"Rate: {rate:.1f} Hz",
+        ]
+        
+        return "\n".join(lines)
+    
+    def _handle_accelerometer_data(self, sender, data: bytes):
+        """Handle incoming accelerometer data from BLE"""
         try:
-            if len(data) < 4:
-                return False
+            if len(data) < 8:
+                return
             
+            # Parse Chileaf protocol
             header = data[0]
-            length = data[1]
-            command = data[2]
+            cmd = data[1]
             
-            if header != self.CHILEAF_HEADER or command != self.CHILEAF_CMD_ACCELEROMETER:
-                return False
+            if header != self.CHILEAF_HEADER or cmd != self.CHILEAF_CMD_ACCELEROMETER:
+                return
             
-            self.frame_count += 1
-            frame_time = time.time()
+            # Extract raw accelerometer values (16-bit signed, big-endian)
+            ax_raw = struct.unpack('>h', data[2:4])[0]
+            ay_raw = struct.unpack('>h', data[4:6])[0]
+            az_raw = struct.unpack('>h', data[6:8])[0]
             
-            payload_bytes = len(data) - 4
-            samples_count = payload_bytes // 6
-            
-            for i in range(samples_count):
-                offset = 3 + (i * 6)
-                accel_data = data[offset:offset + 6]
-                self.parse_single_sample(accel_data, frame_time)
-            
-            return True
-        except Exception as e:
-            print(f"Parse error: {e}")
-            return False
-
-    def parse_single_sample(self, accel_data, frame_time):
-        """Parse single 6-byte accelerometer sample"""
-        if len(accel_data) < 6:
-            return
-        
-        try:
-            ax_raw, ay_raw, az_raw = struct.unpack('<hhh', accel_data)
-            
+            # Convert to g (gravity units)
             ax = ax_raw / self.CHILEAF_CONVERSION_FACTOR
             ay = ay_raw / self.CHILEAF_CONVERSION_FACTOR
             az = az_raw / self.CHILEAF_CONVERSION_FACTOR
             
-            magnitude = (ax**2 + ay**2 + az**2)**0.5
+            # Create sample
+            sample = AccelerometerData(
+                ax=ax,
+                ay=ay,
+                az=az,
+                timestamp=time.time()
+            )
+            
+            # Update display buffer
+            self.magnitude_data.append(sample.magnitude)
+            self.timestamps_data.append(sample.timestamp)
             
             self.sample_count += 1
-            timestamp = frame_time
             
-            # Store data
-            self.magnitude_data.append(magnitude)
-            self.timestamps_data.append(timestamp)
-            self.mag_smooth_buffer.append(magnitude)  # Per smoothing state machine
-            self.mag_std_buffer.append(magnitude)  # Per calcolo STD
-            
-            # Populate pre-buffer continuously (only if window not active)
-            if not self.window_active:
-                self.pre_buffer_mag.append(magnitude)
-                self.pre_buffer_time.append(timestamp)
-                self.pre_buffer_idx.append(self.sample_count - 1)
-            
-            # Calculate current STD (movement variability)
-            if len(self.mag_std_buffer) >= 10:
-                self.current_std = np.std(list(self.mag_std_buffer))
+            # Baseline calibration
+            if not self.baseline_calculated:
+                if not self.countdown_active:
+                    # Start countdown
+                    self.countdown_active = True
+                    self.countdown_start_time = time.time()
+                    print("\n🔔 CALIBRATION COUNTDOWN: Keep device still!")
+                else:
+                    # Check if countdown finished
+                    elapsed = time.time() - self.countdown_start_time
+                    if elapsed >= self.countdown_duration:
+                        # Collect baseline samples
+                        self.baseline_samples.append(sample)
+                        
+                        if len(self.baseline_samples) >= self.BASELINE_SAMPLES_COUNT:
+                            # Calculate baseline
+                            magnitudes = [s.magnitude for s in self.baseline_samples]
+                            y_values = [s.ay for s in self.baseline_samples]
+                            
+                            baseline_mag = sum(magnitudes) / len(magnitudes)
+                            baseline_y = sum(y_values) / len(y_values)
+                            
+                            self.rep_service.set_baseline(baseline_mag, baseline_y)
+                            self.rep_service.start_monitoring()
+                            self.baseline_calculated = True
+                            self.monitoring_active = True
+                            
+                            print(f"✅ Baseline calibrated: mag={baseline_mag:.4f}g, Y={baseline_y:.4f}g")
+                            print("🎯 MONITORING ACTIVE - Perform reps!")
+                            
+                            # Beep to signal ready
+                            try:
+                                winsound.Beep(800, 200)
+                            except:
+                                pass
             else:
-                self.current_std = 0.0
-            
-            # Baseline calibration (first 25 samples after countdown)
-            if not self.baseline_calculated and not self.countdown_active:
-                self.baseline_samples.append(magnitude)
-                if len(self.baseline_samples) >= self.BASELINE_SAMPLES_COUNT:
-                    self.baseline_value = np.median(self.baseline_samples)
-                    self.baseline_calculated = True
-                    print(f"\n✅ BASELINE CALIBRATED: {self.baseline_value:.3f}g")
-                    print("🟢 VBT MONITORING ACTIVE (STD-based detection)\n")
-                return
-            
-            # Real-time velocity integration (FIXED 1.0g gravity compensation)
-            if self.baseline_calculated and len(self.timestamps_data) >= 2:
-                dt = self.timestamps_data[-1] - self.timestamps_data[-2]
-                # GRAVITY COMPENSATION - Fixed 1.0g (Vitruve/Beast/Enode standard)
-                mag_accel_net = (magnitude - 1.0) * 9.81  # m/s²
-                self.current_velocity = self.current_velocity + mag_accel_net * dt
-                self.velocity_data.append(self.current_velocity)
+                # Process sample through rep capture service
+                self.rep_service.process_sample(sample)
                 
-                # Check event window (event window system with markers)
-                self.check_event_window(timestamp, len(self.magnitude_data) - 1, magnitude)
-            else:
-                self.velocity_data.append(0.0)
-                
-        except struct.error as e:
-            print(f"Unpack error: {e}")
-
-    def open_event_window(self, current_time, current_idx):
-        """Opens 2.5s window for movement analysis (with 0.5s pre-buffer)"""
-        self.window_active = True
-        
-        # Include pre-buffer data in window
-        self.window_data_mag = list(self.pre_buffer_mag)
-        self.window_data_time = list(self.pre_buffer_time)
-        self.window_data_idx = list(self.pre_buffer_idx)
-        
-        # The "true" start time is that of the first sample in the pre-buffer
-        if len(self.window_data_time) > 0:
-            self.window_start_time = self.window_data_time[0]
-            self.window_start_idx = self.window_data_idx[0]
-        else:
-            self.window_start_time = current_time
-            self.window_start_idx = current_idx
-        
-        self.markers = {
-            'counter_movement': None,
-            'bottom': None,
-            'peak': None,
-            'deceleration': None
-        }
-        
-        pre_buffer_duration = current_time - self.window_start_time if len(self.window_data_time) > 0 else 0
-        print(f"\n🔵 EVENT WINDOW OPENED at {current_time:.2f}s (with {pre_buffer_duration:.2f}s pre-buffer)")
-        
-        # Grave beep for window opening (non-blocking, only if >0.5s since last)
-        now = time.time()
-        if now - self.last_beep_time > 0.5:
-            self.last_beep_time = now
-            threading.Thread(target=lambda: winsound.Beep(400, 300), daemon=True).start()
-    
-    def close_and_analyze_window(self, current_time):
-        """Closes window and analyzes markers to validate squat"""
-        print(f"\n🔴 EVENT WINDOW CLOSED at {current_time:.2f}s ({len(self.window_data_mag)} samples)")
-        
-        if len(self.window_data_mag) < 30:  # Minimo 30 samples (~0.6s @ 50Hz)
-            print("⚠️  Window too short - ignore event")
-            self.window_active = False
-            return
-        
-        # === FIND MARKERS ===
-        baseline = self.baseline_value
-        
-        # 1. Counter-movement (YELLOW - window opening, first cusp below baseline)
-        for i in range(min(25, len(self.window_data_mag))):  # Primi 0.5s
-            if self.window_data_mag[i] < baseline * 0.92:  # Sotto 92% baseline
-                if self.markers['counter_movement'] is None:
-                    self.markers['counter_movement'] = {
-                        'idx': self.window_data_idx[i],
-                        'mag': self.window_data_mag[i],
-                        'time': self.window_data_time[i]
-                    }
-                    break
-        
-        # 2. Concentric push peak (BLUE - absolute maximum = push acceleration)
-        max_global_idx = np.argmax(self.window_data_mag)
-        self.markers['peak'] = {
-            'idx': self.window_data_idx[max_global_idx],
-            'mag': self.window_data_mag[max_global_idx],
-            'time': self.window_data_time[max_global_idx]
-        }
-        
-        # 3. Accelerometer recoil (RED - minimum after blue peak)
-        post_peak_start = max_global_idx + 1
-        if post_peak_start < len(self.window_data_mag):
-            post_peak_mag = self.window_data_mag[post_peak_start:]
-            min_idx_relative = np.argmin(post_peak_mag)
-            min_idx = post_peak_start + min_idx_relative
-            self.markers['bottom'] = {
-                'idx': self.window_data_idx[min_idx],
-                'mag': self.window_data_mag[min_idx],
-                'time': self.window_data_time[min_idx]
-            }
-            
-            # 4. Return to baseline (GREEN - rise towards baseline after recoil)
-            post_recoil_start = min_idx + 1
-            if post_recoil_start < len(self.window_data_mag) - 5:
-                post_recoil_mag = self.window_data_mag[post_recoil_start:]
-                green_idx_relative = np.argmax(post_recoil_mag)
-                green_idx = post_recoil_start + green_idx_relative
-                self.markers['deceleration'] = {
-                    'idx': self.window_data_idx[green_idx],
-                    'mag': self.window_data_mag[green_idx],
-                    'time': self.window_data_time[green_idx]
-                }
-        else:
-            # Fallback if not enough data after peak
-            min_idx = np.argmin(self.window_data_mag)
-            self.markers['bottom'] = {
-                'idx': self.window_data_idx[min_idx],
-                'mag': self.window_data_mag[min_idx],
-                'time': self.window_data_time[min_idx]
-            }
-        
-        # === PRINT MARKERS ===
-        print("\n📍 MARKERS FOUND:")
-        for name, marker in self.markers.items():
-            if marker:
-                print(f"  {name:20s}: {marker['mag']:.3f}g at {marker['time']:.2f}s")
-        
-        # === VALIDATE SQUAT ===
-        is_valid = self.validate_squat_from_markers()
-        
-        # === SAVE SCREENSHOT AND CSV ===
-        self.save_window_data(is_valid)
-        
-        if is_valid:
-            self.finalize_rep_from_markers()
-        else:
-            print("❌ Pattern non valido - NON è uno squat")
-        
-        self.window_active = False
-    
-    def save_window_data(self, is_valid):
-        """Saves window screenshot AND CSV with all data and VBT metrics"""
-        try:
-            import os
-            import csv
-            
-            # Create base directories if they don't exist
-            screenshot_base = "windowshots"
-            csv_base = "csv_shots"
-            
-            # Create subdirectory for current profile
-            screenshot_dir = os.path.join(screenshot_base, self.profile)
-            csv_dir = os.path.join(csv_base, self.profile)
-            
-            for d in [screenshot_dir, csv_dir]:
-                if not os.path.exists(d):
-                    os.makedirs(d)
-            
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            status = "VALID" if is_valid else "REJECTED"
-            
-            # === SAVE SCREENSHOT ===
-            fig_s = plt.figure(figsize=(14, 6))
-            ax_s = fig_s.add_subplot(111)
-            times_rel = [(t - self.window_start_time) for t in self.window_data_time]
-            ax_s.plot(times_rel, self.window_data_mag, 'purple', linewidth=2, label='Magnitude', alpha=0.8)
-            ax_s.axhline(y=self.baseline_value, color='blue', linestyle='--', linewidth=1.5, label='Baseline')
-            ax_s.axhline(y=self.MIN_DEPTH_MAG, color='orange', linestyle='--', linewidth=1, alpha=0.6, label='Min Depth')
-            ax_s.axhline(y=self.MIN_PEAK_MAG, color='cyan', linestyle='--', linewidth=1, alpha=0.6, label='Min Peak')
-            colors = {'counter_movement': 'yellow', 'peak': 'blue', 'bottom': 'red', 'deceleration': 'green'}
-            for name, m in self.markers.items():
-                if m:
-                    t = m['time'] - self.window_start_time
-                    ax_s.scatter([t], [m['mag']], s=200, marker='o', color=colors[name], edgecolors='black', linewidths=2, zorder=10, label=name.replace('_', ' ').title())
-                    ax_s.annotate(f"{m['mag']:.3f}g", xy=(t, m['mag']), xytext=(10, 10), textcoords='offset points', fontsize=9, fontweight='bold', bbox=dict(boxstyle='round', facecolor=colors[name], alpha=0.7))
-            ax_s.set_title(f"Event Window - {status}", fontsize=14, fontweight='bold')
-            ax_s.set_xlabel("Time (s)", fontsize=12)
-            ax_s.set_ylabel("Magnitude (g)", fontsize=12)
-            ax_s.set_ylim(0, 2.0)
-            ax_s.grid(True, alpha=0.3)
-            ax_s.legend(loc='upper right', fontsize=8)
-            png_fname = os.path.join(screenshot_dir, f"window_{ts}_{status}.png")
-            fig_s.savefig(png_fname, dpi=150, bbox_inches='tight')
-            plt.close(fig_s)
-            print(f"📸 PNG: {png_fname}")
-            
-            # === SAVE CSV ===
-            csv_fname = os.path.join(csv_dir, f"window_{ts}_{status}.csv")
-            with open(csv_fname, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                
-                # Header: Metadata
-                writer.writerow(['# VBT Window Data Export'])
-                writer.writerow(['# Timestamp', ts])
-                writer.writerow(['# Status', status])
-                writer.writerow(['# Load Weight (kg)', self.load_weight_kg])
-                writer.writerow(['# Baseline (g)', f"{self.baseline_value:.4f}"])
-                writer.writerow(['# Min Depth Threshold (g)', f"{self.MIN_DEPTH_MAG:.2f}"])
-                writer.writerow(['# Min Peak Threshold (g)', f"{self.MIN_PEAK_MAG:.2f}"])
-                writer.writerow([])
-                
-                # VBT Metrics (if valid)
-                if is_valid:
-                    # Calculate simple metrics from markers
-                    peak = self.markers['peak']
-                    recoil = self.markers['bottom']
-                    time_to_peak = peak['time'] - self.window_start_time
-                    delta_mag = peak['mag'] - self.baseline_value
-                    mean_velocity = abs(delta_mag) * 9.81 * self.VELOCITY_FACTOR
-                    peak_velocity = mean_velocity * 1.3  # Estimate
-                    mpv = mean_velocity * 1.15  # Estimate
-                    
-                    # Power calculations (if load provided)
-                    if self.load_weight_kg > 0:
-                        mean_power = self.load_weight_kg * 9.81 * mean_velocity
-                        peak_power = self.load_weight_kg * 9.81 * peak_velocity
-                        mpv_power = self.load_weight_kg * 9.81 * mpv
-                    else:
-                        mean_power = 0.0
-                        peak_power = 0.0
-                        mpv_power = 0.0
-                    
-                    writer.writerow(['# VBT METRICS'])
-                    writer.writerow(['Mean Velocity (MV)', f"{mean_velocity:.3f}", 'm/s'])
-                    writer.writerow(['Peak Velocity (PV)', f"{peak_velocity:.3f}", 'm/s'])
-                    writer.writerow(['Mean Propulsive Velocity (MPV)', f"{mpv:.3f}", 'm/s'])
-                    writer.writerow(['Time to Peak', f"{time_to_peak:.3f}", 's'])
-                    writer.writerow(['Mean Power', f"{mean_power:.1f}", 'W'])
-                    writer.writerow(['Peak Power', f"{peak_power:.1f}", 'W'])
-                    writer.writerow(['MPV Power', f"{mpv_power:.1f}", 'W'])
-                    writer.writerow([])
-                
-                # Markers
-                writer.writerow(['# MARKERS'])
-                writer.writerow(['Marker', 'Time (s)', 'Magnitude (g)', 'Color'])
-                for name, m in self.markers.items():
-                    if m:
-                        t_rel = m['time'] - self.window_start_time
-                        writer.writerow([name, f"{t_rel:.4f}", f"{m['mag']:.4f}", colors[name]])
-                writer.writerow([])
-                
-                # Time series data
-                writer.writerow(['# TIME SERIES DATA'])
-                writer.writerow(['Time_Relative (s)', 'Magnitude (g)'])
-                for t, mag in zip(times_rel, self.window_data_mag):
-                    writer.writerow([f"{t:.4f}", f"{mag:.4f}"])
-            
-            print(f"💾 CSV: {csv_fname}")
-            
         except Exception as e:
-            print(f"⚠️  Save error: {e}")
-            import traceback
+            print(f"⚠️ Error processing data: {e}")
             traceback.print_exc()
-    
-    def validate_squat_from_markers(self):
-        """Validates that markers form a valid squat pattern"""
-        peak = self.markers['peak']  # BLUE - concentric push peak
-        recoil = self.markers['bottom']  # RED - accelerometer recoil
-        
-        if not peak:
-            print("⚠️  Peak missing")
-            return False
-        
-        # 1. Push peak must be sufficiently high
-        if peak['mag'] <= self.MIN_PEAK_MAG:
-            print(f"⚠️  Peak too low: {peak['mag']:.3f}g <= {self.MIN_PEAK_MAG}g")
-            return False
-        
-        # 2. There must be recoil after the peak
-        if not recoil:
-            print(f"⚠️  Recoil missing")
-            return False
-        
-        # 3. Recoil must be AFTER the peak (correct temporal order)
-        if recoil['time'] <= peak['time']:
-            print(f"⚠️  Wrong order: recoil before peak")
-            return False
-        
-        # 4. Calculate concentric phase duration (window start -> peak)
-        time_to_peak = peak['time'] - self.window_start_time
-        
-        # DURATION VALIDATION: full VBT range (from explosive to controlled)
-        if time_to_peak < self.MIN_CONCENTRIC_DURATION:
-            print(f"⚠️  Movimento troppo rapido: {time_to_peak:.2f}s < {self.MIN_CONCENTRIC_DURATION}s")
-            return False
-        
-        # 5. Calcola velocità media: formula VBT standard
-        # Velocità = (picco_accelerazione - baseline) * g * sqrt(2 * spostamento_stimato)
-        # Semplificato: delta_mag rappresenta accelerazione netta, moltiplichiamo per g
-        delta_mag = peak['mag'] - self.baseline_value
-        # Velocità media per VBT: assumiamo spostamento proporzionale a tempo²
-        # Formula semplificata usata da sistemi commerciali
-        mean_velocity = abs(delta_mag) * 9.81 * 0.5  # g -> m/s² con fattore medio
-        
-        print(f"✅ SQUAT VALIDO: picco={peak['mag']:.3f}g, rinculo={recoil['mag']:.3f}g, tempo={time_to_peak:.2f}s, MV={mean_velocity:.3f}m/s")
-        return True
-    
-    def finalize_rep_from_markers(self):
-        """Finalizza rep usando marker invece di state machine"""
-        peak = self.markers['peak']  # BLU - picco spinta concentrica
-        
-        # Calcola velocità media dalla spinta: baseline -> picco
-        time_to_peak = peak['time'] - self.window_start_time
-        delta_mag = peak['mag'] - self.baseline_value
-        # Formula VBT: delta accelerazione * g * fattore (FROM CONFIG)
-        mean_velocity = abs(delta_mag) * 9.81 * self.VELOCITY_FACTOR
-        
-        # Store rep
-        self.rep_count += 1
-        self.rep_numbers.append(self.rep_count)
-        self.rep_velocities.append(mean_velocity)
-        
-        self.last_mean_velocity = mean_velocity
-        self.last_peak_velocity = mean_velocity * 1.3  # Stima
-        self.last_mpv = mean_velocity * 1.15
-        
-        self.last_rep_end_time = peak['time']
-        
-        print(f"\n🎯 REP #{self.rep_count} COMPLETED - MV: {mean_velocity:.3f} m/s\n")
-        
-        # Beep acuto completamento (non bloccante, solo se passati >0.5s dall'ultimo)
-        now = time.time()
-        if now - self.last_beep_time > 0.5:
-            self.last_beep_time = now
-            threading.Thread(target=lambda: winsound.Beep(1000, 200), daemon=True).start()
 
-    def check_event_window(self, current_time, current_idx, magnitude):
-        """Sistema a finestra evento per rilevare squat"""
-        if not self.baseline_calculated:
+    async def start_accelerometer_stream(self):
+        """Start receiving accelerometer data"""
+        print("\n🎯 Starting accelerometer stream...")
+        
+        # Subscribe to notifications
+        await self.client.start_notify(self.tx_char.uuid, self._handle_accelerometer_data)
+        
+        # Send start command
+        start_cmd = bytes([self.CHILEAF_HEADER, self.CHILEAF_CMD_ACCELEROMETER, 0x01])
+        await self.client.write_gatt_char(self.CHILEAF_RX_UUID, start_cmd)
+        
+        print("✅ Accelerometer stream started")
+
+    async def run(self):
+        """Main run loop"""
+        # Get weight from user
+        while True:
+            try:
+                weight_str = input("\n🏋️ Enter weight (kg) [default: 20]: ").strip()
+                if not weight_str:
+                    self.load_weight_kg = 20.0
+                else:
+                    self.load_weight_kg = float(weight_str)
+                break
+            except ValueError:
+                print("Invalid weight. Please enter a number.")
+        
+        print(f"\n→ Weight set to: {self.load_weight_kg:.0f} kg")
+        
+        # Connect
+        if not await self.scan_and_connect():
             return
         
-        if len(self.mag_smooth_buffer) < self.MAG_SMOOTH_WINDOW:
+        # Discover services
+        if not await self.discover_services():
             return
         
-        # Calcola magnitudine smoothed
-        mag_smooth = sum(self.mag_smooth_buffer) / len(self.mag_smooth_buffer)
+        # Setup plot
+        self.setup_plot()
         
-        # Soglie baseline
-        baseline_lower = self.baseline_value * (1 - self.BASELINE_ZONE)
-        baseline_upper = self.baseline_value * (1 + self.BASELINE_ZONE)
+        # Start accelerometer
+        await self.start_accelerometer_stream()
         
-        # === WINDOW MANAGEMENT ===
+        # Start animation
+        print("\n🎬 Starting real-time display...")
+        self.animation_obj = animation.FuncAnimation(
+            self.fig, 
+            self.update_plot, 
+            interval=100,  # 10 FPS
+            blit=False,
+            cache_frame_data=False
+        )
         
-        # Apri finestra se baseline break + refractory rispettato + STD movimento
-        if not self.window_active:
-            # Trigger verso il BASSO (squat, bench press - fase eccentrica)
-            trigger_down = mag_smooth < baseline_lower
-            
-            # Trigger verso l'ALTO (deadlift - inizio concentrico)
-            # Attivo solo per profilo deadlift
-            trigger_up = False
-            if self.profile == 'deadlift':
-                trigger_up = mag_smooth > baseline_upper
-            
-            if trigger_down or trigger_up:
-                if (current_time - self.last_rep_end_time) >= self.REFRACTORY_PERIOD:
-                    if self.current_std >= self.MIN_MOVEMENT_STD:
-                        trigger_type = "DOWN" if trigger_down else "UP"
-                        print(f"🔔 Trigger {trigger_type} detected: {mag_smooth:.3f}g")
-                        self.open_event_window(current_time, current_idx)
-            return  # Non fare altro se finestra non attiva
-        
-        # Finestra attiva: accumula dati
-        if self.window_active:
-            self.window_data_mag.append(magnitude)
-            self.window_data_time.append(current_time)
-            self.window_data_idx.append(current_idx)
-            
-            # Chiudi finestra dopo 3 secondi
-            window_duration = current_time - self.window_start_time
-            if window_duration >= self.WINDOW_DURATION:
-                self.close_and_analyze_window(current_time)
-        
-        # Nota: analisi marker avviene in close_and_analyze_window()
-        return
-
-    # === OLD STATE MACHINE REMOVED - NOW USING EVENT WINDOW SYSTEM ===
-    
-    def notification_handler(self, sender, data):
-        """BLE notification handler"""
-        try:
-            self.parse_chileaf_data(data)
-        except Exception as e:
-            print(f"Handler error: {e}")
-
-    async def start_monitoring(self):
-        """Start BLE monitoring"""
-        print("\n🔵 Starting VBT monitoring...")
-        
-        await self.client.start_notify(self.tx_char, self.notification_handler)
-        print("✅ Notifications enabled")
-        
-        # Start countdown
-        self.countdown_active = True
-        self.countdown_start_time = time.time()
-        print("\n⏱️  COUNTDOWN: 3... 2... 1...")
-        
-        self.monitoring_active = True
-        
-        try:
-            while self.monitoring_active and self.is_connected:
-                await asyncio.sleep(0.1)
-        except KeyboardInterrupt:
-            print("\n⏹️  Stopping...")
-        finally:
-            await self.client.stop_notify(self.tx_char)
-
-    async def disconnect(self):
-        """Disconnect from device"""
-        if self.client and self.is_connected:
-            await self.client.disconnect()
-            print("✅ Disconnected")
-
-async def async_main(monitor):
-    """Async main function"""
-    print("=" * 70)
-    print("CL837 VBT MONITOR - Output Sports Style")
-    print("Real-time velocity bar chart")
-    print("=" * 70)
-    
-    try:
-        if not await monitor.scan_and_connect():
-            return False
-        
-        if not await monitor.discover_services():
-            return False
-        
-        await monitor.start_monitoring()
-        return True
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        traceback.print_exc()
-        return False
-
-def start_plot_thread(monitor):
-    """Start matplotlib in background thread"""
-    def run_plot():
-        monitor.setup_plot()
-        monitor.animation_obj = animation.FuncAnimation(
-            monitor.fig, monitor.update_plot, interval=50, blit=False, cache_frame_data=False)
-        monitor.plot_ready = True
         plt.show()
-    
-    plot_thread = threading.Thread(target=run_plot, daemon=False)
-    plot_thread.start()
-    
-    while not monitor.plot_ready:
-        time.sleep(0.1)
-    
-    return plot_thread
-
-def get_load_weight() -> float:
-    """Prompt user for load weight in kg"""
-    print("\n" + "="*70)
-    print("LOAD WEIGHT INPUT")
-    print("="*70)
-    print("\n⚖️  Enter the weight you're lifting (kg)")
-    print("   Examples: 20, 60, 100, 140")
-    print("   Press Enter to skip (power metrics will not be calculated)")
-    
-    while True:
-        weight_input = input("\nLoad weight (kg): ").strip()
         
-        if not weight_input:
-            print("✅ No load weight specified. Power metrics will be 0.")
-            return 0.0
-        
+        # Cleanup
+        print("\n🛑 Stopping...")
         try:
-            weight = float(weight_input)
-            if weight < 0:
-                print("⚠️  Weight cannot be negative. Try again.")
-                continue
-            if weight > 500:
-                print("⚠️  Weight seems unrealistic (>500kg). Try again.")
-                continue
-            
-            print(f"✅ Load weight set to: {weight:.1f} kg")
-            return weight
-            
-        except ValueError:
-            print("⚠️  Invalid input. Enter a number (e.g., 60)")
+            if self.client and self.client.is_connected:
+                await self.client.stop_notify(self.tx_char.uuid)
+                await self.client.disconnect()
+                print("✅ Disconnected")
+        except Exception as e:
+            print(f"⚠️ Cleanup error: {e}")
 
-def select_profile_interactive() -> str:
-    """Interactive profile selection menu"""
-    try:
-        config = VBTConfig("vbt_config.json")
-        profiles = config.list_profiles()
-        default_profile = config.config.get('default_profile', 'squat_speed')
-        
-        print("\n" + "="*70)
-        print("VBT PROFILE SELECTION")
-        print("="*70)
-        print("\n📋 Available Profiles:\n")
-        
-        profile_list = list(profiles.items())
-        for i, (name, desc) in enumerate(profile_list, 1):
-            default_marker = " [DEFAULT]" if name == default_profile else ""
-            print(f"   {i}. {name:20s} - {desc}{default_marker}")
-        
-        print(f"\n{'='*70}")
-        choice = input(f"\nSelect profile (1-{len(profile_list)}) or press Enter for default: ").strip()
-        
-        if not choice:
-            print(f"✅ Using default profile: {default_profile}")
-            return default_profile
-        
-        try:
-            idx = int(choice) - 1
-            if 0 <= idx < len(profile_list):
-                selected = profile_list[idx][0]
-                print(f"✅ Selected profile: {selected}")
-                return selected
-            else:
-                print(f"⚠️  Invalid choice. Using default: {default_profile}")
-                return default_profile
-        except ValueError:
-            print(f"⚠️  Invalid input. Using default: {default_profile}")
-            return default_profile
-            
-    except Exception as e:
-        print(f"⚠️  Error loading profiles: {e}")
-        print("   Using default profile: squat_speed")
-        return "squat_speed"
 
-def main():
+# =============================================================================
+# MAIN
+# =============================================================================
+
+async def main():
     """Main entry point"""
-    import warnings
-    import sys
-    warnings.filterwarnings("ignore", category=RuntimeWarning)
+    print("\n" + "="*70)
+    print("CL837 VBT MONITOR")
+    print("Translated from Dart vbt_test")
+    print("="*70)
     
-    # Parse command line args for profile selection
-    profile = None
-    if len(sys.argv) > 1:
-        # Profile specified via command line
-        profile = sys.argv[1]
-        print(f"\n🚀 Starting VBT Monitor with profile: {profile}")
-    else:
-        # Interactive menu
-        profile = select_profile_interactive()
-    
-    # Get load weight
-    load_weight = get_load_weight()
-    
-    monitor = CL837VBTMonitor(config_file="vbt_config.json", profile=profile)
-    monitor.load_weight_kg = load_weight
-    
-    try:
-        # Start matplotlib in background
-        print("\n🎨 Starting VBT display...")
-        plot_thread = start_plot_thread(monitor)
-        print("✅ Display ready")
-        
-        # Run BLE in main thread
-        print("\n🔵 Starting BLE connection...")
-        asyncio.run(async_main(monitor))
-        
-        print("\n✅ Monitoring completed")
-        print("Waiting for display to close...")
-        
-        plot_thread.join()
-        
-    except KeyboardInterrupt:
-        print("\n⏹️  Program terminated")
-        monitor.monitoring_active = False
-        plt.close('all')
-    finally:
-        monitor.monitoring_active = False
+    monitor = CL837VBTMonitor()
+    await monitor.run()
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
