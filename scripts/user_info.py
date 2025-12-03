@@ -169,24 +169,29 @@ class CL837UserInfoManager:
             traceback.print_exc()
 
     def parse_user_info_response(self, data):
-        """Parse user info response"""
+        """Parse user info response
+        
+        SDK format (WearReceivedDataCallback.java line 94):
+        [0]=header, [1]=len, [2]=cmd, [3]=?, [4]=?, 
+        [5]=age, [6]=sex, [7]=weight, [8]=height, [9-13]=userId(5 bytes)
+        """
         try:
-            # Format: [header, len, cmd, age, sex, weight, height, userId(5 bytes)]
-            if len(data) >= 13:
-                age = data[3]
-                sex = data[4]  # 0 = male, 1 = female
-                weight = data[5]  # kg
-                height = data[6]  # cm
+            # Format: [header, len, cmd, ?, ?, age, sex, weight, height, userId(5 bytes)]
+            if len(data) >= 14:
+                age = data[5]
+                sex = data[6]  # 0 = male, 1 = female
+                weight = data[7]  # kg
+                height = data[8]  # cm
                 
-                # User ID (5 bytes, 40-bit integer)
-                user_id_bytes = data[7:12]
+                # User ID (5 bytes, 40-bit integer) - big endian
+                user_id_bytes = data[9:14]
                 user_id = 0
                 for byte in user_id_bytes:
                     user_id = (user_id << 8) | byte
                 
                 self.user_info = {
                     'age': age,
-                    'sex': 'Male' if sex == 0 else 'Female',
+                    'sex': 'Male' if sex == 1 else 'Female',  # SDK: Male=1, Female=0
                     'sex_code': sex,
                     'weight_kg': weight,
                     'height_cm': height,
