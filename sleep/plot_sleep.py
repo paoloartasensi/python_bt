@@ -151,14 +151,14 @@ def plot_sleep_stages_bar(df: pd.DataFrame, output_path: str = None):
 
 def plot_sleep_quality_timeline(df: pd.DataFrame, output_path: str = None):
     """
-    Timeline del sonno con qualità (% deep sleep)
+    Timeline del sonno con qualità (% deep sleep) - usando logica SDK
     """
     fig, ax = plt.subplots(figsize=(14, 5))
     
-    # Calcola percentuale deep sleep
-    df['total_sleep'] = df['deep_sleep_min'] + df['light_sleep_min']
+    # Usa i dati ricalcolati con logica SDK
+    df['total_sleep'] = df['deep_sleep_sdk'] + df['light_sleep_sdk']
     df['deep_pct'] = np.where(df['total_sleep'] > 0, 
-                               df['deep_sleep_min'] / df['total_sleep'] * 100, 0)
+                               df['deep_sleep_sdk'] / df['total_sleep'] * 100, 0)
     
     # Colore basato sulla qualità
     colors = plt.cm.RdYlGn(df['deep_pct'] / 100)
@@ -173,7 +173,7 @@ def plot_sleep_quality_timeline(df: pd.DataFrame, output_path: str = None):
     
     ax.set_xlabel('Date', fontsize=11)
     ax.set_ylabel('Deep Sleep %', fontsize=11)
-    ax.set_title('Sleep Quality Over Time (bubble size = duration)', fontsize=14, fontweight='bold')
+    ax.set_title('Sleep Quality Over Time (SDK logic, bubble size = duration)', fontsize=14, fontweight='bold')
     
     # Colorbar
     cbar = plt.colorbar(scatter, ax=ax)
@@ -203,12 +203,13 @@ def plot_daily_summary(df: pd.DataFrame, output_path: str = None):
     """
     Sommario per NOTTE di sonno (non per giorno solare)
     Una notte = sonno tra 18:00 giorno X e 18:00 giorno X+1
+    Usa classificazione fasi SDK (basata su consecutività zeri)
     """
-    # Aggrega per NOTTE (non per giorno solare)
+    # Aggrega per NOTTE usando dati SDK
     nightly = df.groupby('sleep_night').agg({
-        'deep_sleep_min': 'sum',
-        'light_sleep_min': 'sum',
-        'awake_min': 'sum',
+        'deep_sleep_sdk': 'sum',
+        'light_sleep_sdk': 'sum',
+        'awake_sdk': 'sum',
         'duration_minutes': 'sum'
     }).reset_index()
     
@@ -238,18 +239,18 @@ def plot_daily_summary(df: pd.DataFrame, output_path: str = None):
             ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
                     f'{hours:.1f}h', ha='center', va='bottom', fontsize=9)
     
-    # Grafico 2: Composizione sonno (stacked)
+    # Grafico 2: Composizione sonno (stacked) - usando dati SDK
     ax2 = axes[1]
-    ax2.bar(x_pos, nightly['deep_sleep_min']/60, label='Deep', color='#1a237e', alpha=0.9)
-    ax2.bar(x_pos, nightly['light_sleep_min']/60, bottom=nightly['deep_sleep_min']/60,
+    ax2.bar(x_pos, nightly['deep_sleep_sdk']/60, label='Deep', color='#1a237e', alpha=0.9)
+    ax2.bar(x_pos, nightly['light_sleep_sdk']/60, bottom=nightly['deep_sleep_sdk']/60,
             label='Light', color='#42a5f5', alpha=0.9)
-    ax2.bar(x_pos, nightly['awake_min']/60, 
-            bottom=(nightly['deep_sleep_min'] + nightly['light_sleep_min'])/60,
+    ax2.bar(x_pos, nightly['awake_sdk']/60, 
+            bottom=(nightly['deep_sleep_sdk'] + nightly['light_sleep_sdk'])/60,
             label='Awake', color='#ff7043', alpha=0.9)
     
     ax2.set_xlabel('Night', fontsize=11)
     ax2.set_ylabel('Hours', fontsize=11)
-    ax2.set_title('Sleep Composition by Night', fontsize=14, fontweight='bold')
+    ax2.set_title('Sleep Composition by Night (SDK classification)', fontsize=14, fontweight='bold')
     ax2.legend(loc='upper right')
     ax2.grid(axis='y', alpha=0.3)
     
