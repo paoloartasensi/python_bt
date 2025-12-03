@@ -2,29 +2,20 @@
 CL837 Heart Rate History Download
 Connection, UTC sync, and HR data retrieval
 
-⚠️ NOTE: The CL837 device does NOT respond to HR history commands (0x21/0x22).
-Testing shows the device completely ignores these commands despite them being 
-documented in the Android SDK (WearManager.java).
+Protocol based on decompiled Chileaf Android SDK:
+- Command 0x21: Get HR history records (timestamps)
+- Command 0x22: Get HR data for specific timestamp
+- Command 0x23: End marker (0xFFFFFFFF)
 
-This script will NOT work on CL837 devices - confirmed by:
-- Sending command 0x21 (get HR records)
-- Device only responds with: accelerometer (0x0C), temperature (0x38), 
-  sport data (0x15), health metrics (0x75)
-- No 0x21 or 0x22 responses after 200+ test packets
-
-For HR monitoring on CL837, use realtime_monitor.py to access:
-- Real-time HR via standard BLE HR Service (UUID 00002a37)
-- Or real-time health data via Chileaf push notifications
-
-This script may work on higher-end Chileaf models (CL838, CL839, etc.)
-that have more memory and support command 0x21.
+Checksum formula (from FitnessManager.java):
+  checksum = ((0 - sum(packet)) ^ 0x3A) & 0xFF
 """
 import asyncio
 import time
 import struct
 import traceback
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 from bleak import BleakClient, BleakScanner
 
 
@@ -47,6 +38,7 @@ class CL837HRMonitor:
         self.CMD_SET_UTC = 0x08
         self.CMD_GET_HR_RECORD = 0x21  # Get HR records (timestamps)
         self.CMD_GET_HR_DATA = 0x22    # Get HR data for specific timestamp
+        self.CMD_HR_DATA_END = 0x23    # End marker for HR data download
         
         # HR data storage
         self.hr_records = []
@@ -169,9 +161,6 @@ class CL837HRMonitor:
             length = data[1]
             cmd = data[2]
             
-            # DEBUG: Print all received packets
-            print(f"[DEBUG] Received: header=0x{header:02X}, len={length}, cmd=0x{cmd:02X}, data={data.hex()}")
-            
             if header != self.CHILEAF_HEADER:
                 return
             
@@ -179,74 +168,107 @@ class CL837HRMonitor:
             if cmd == self.CMD_GET_HR_RECORD:
                 self.parse_hr_record_response(data)
             
-            # Response to GET_HR_DATA (0x22)
+            # Response to GET_HR_DATA (0x22) - accumulate packets
             elif cmd == self.CMD_GET_HR_DATA:
                 self.parse_hr_data_response(data)
+            
+            # Response to HR_DATA_END (0x23) - end marker, download complete
+            elif cmd == self.CMD_HR_DATA_END:
+                self.hr_data_complete = True
+                print(f"  ✓ HR data complete ({len(self.hr_data)} values)")
             
             # Response to SET_UTC (0x08)
             elif cmd == self.CMD_SET_UTC:
                 print("  ✓ UTC time synchronized")
-            else:
-                print(f"[DEBUG] Unknown command: 0x{cmd:02X}")
+            # Ignore other commands (0x0C=accel, 0x38=temp, 0x15=sport, 0x75=health)
                 
         except Exception as e:
             print(f"Notification handler error: {e}")
             traceback.print_exc()
 
     def parse_hr_record_response(self, data):
-        """Parse HR record list response"""
+        """Parse HR record response - contains multiple 4-byte UTC timestamps"""
         try:
-            if len(data) < 5:
+            if len(data) < 4:
                 return
             
-            # Check if this is the end marker
-            if len(data) == 5 and data[3] == 0xFF and data[4] == 0xFF:
+            # Check if this is the end marker packet (short packet with 0xFFFFFFFF)
+            if len(data) == 8 and data[3:7] == bytes([0xFF, 0xFF, 0xFF, 0xFF]):
                 self.hr_records_complete = True
                 print(f"\n✓ HR records download complete ({len(self.hr_records)} records)")
                 return
             
-            # Parse record: [header, length, cmd, utc(4 bytes), ...]
-            if len(data) >= 7:
-                utc_bytes = data[3:7]
-                utc_timestamp = struct.unpack('>I', bytes(utc_bytes))[0]
-                
-                self.hr_records.append({
-                    'utc': utc_timestamp,
-                    'datetime': datetime.utcfromtimestamp(utc_timestamp).strftime('%Y-%m-%d %H:%M:%S')
-                })
-                
-                print(f"  HR Record: {datetime.utcfromtimestamp(utc_timestamp).strftime('%Y-%m-%d %H:%M:%S')}")
+            # Parse multiple timestamps from packet
+            # Format: [header(1), length(1), cmd(1), utc1(4), utc2(4), ..., checksum(1)]
+            payload = data[3:-1]  # Remove header, length, cmd, and checksum
+            
+            # Each timestamp is 4 bytes (big-endian)
+            num_timestamps = len(payload) // 4
+            
+            for i in range(num_timestamps):
+                offset = i * 4
+                if offset + 4 <= len(payload):
+                    utc_bytes = payload[offset:offset+4]
+                    utc_timestamp = struct.unpack('>I', bytes(utc_bytes))[0]  # Big-endian
+                    
+                    # Check for end marker within packet
+                    if utc_timestamp == 0xFFFFFFFF:
+                        self.hr_records_complete = True
+                        print(f"\n✓ HR records download complete ({len(self.hr_records)} records)")
+                        return
+                    
+                    # Convert to datetime (local time)
+                    dt = datetime.fromtimestamp(utc_timestamp)
+                    
+                    self.hr_records.append({
+                        'utc': utc_timestamp,
+                        'datetime': dt.strftime('%Y-%m-%d %H:%M:%S')
+                    })
+                    
+                    print(f"  HR Record #{len(self.hr_records)}: {dt.strftime('%Y-%m-%d %H:%M:%S')} (UTC: {utc_timestamp})")
                 
         except Exception as e:
             print(f"Parse HR record error: {e}")
             traceback.print_exc()
 
     def parse_hr_data_response(self, data):
-        """Parse HR data response"""
+        """Parse HR data response - contains multiple HR values per packet.
+        
+        Format: [header(1), length(1), cmd(1), seq(4), hr1, hr2, ..., checksum(1)]
+        
+        SDK accumulates 0x22 packets, then processes all when 0x23 (end marker) arrives.
+        Each packet contains ~128 HR values (1 per minute).
+        """
         try:
-            if len(data) < 5:
+            if len(data) < 8:
                 return
             
-            # Check if this is the end marker
-            if len(data) == 5 and data[3] == 0xFF and data[4] == 0xFF:
-                self.hr_data_complete = True
-                print(f"\n✓ HR data download complete ({len(self.hr_data)} measurements)")
-                return
+            # Parse sequence number (4 bytes, big-endian) at positions 3-6
+            sequence = struct.unpack('>I', bytes(data[3:7]))[0]
             
-            # Parse HR data: [header, length, cmd, sequence, hr_value, ...]
-            # Based on Android SDK: HistoryOfHeartRate.java
-            # Format may vary, this is a basic parser
-            if len(data) >= 5:
-                sequence = data[3]
-                hr_value = data[4]
-                
-                self.hr_data.append({
-                    'sequence': sequence,
-                    'hr_bpm': hr_value,
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                })
-                
-                print(f"  HR Data: Seq={sequence}, BPM={hr_value}")
+            # HR values start at position 7, end before checksum
+            hr_values = data[7:-1]  # Exclude header(3), seq(4), and checksum(1)
+            
+            # Get current session UTC (set by get_hr_data)
+            session_utc = getattr(self, '_current_session_utc', 0)
+            
+            # Store all HR values from this packet
+            packet_hr_count = 0
+            for hr_value in hr_values:
+                if hr_value > 0 and hr_value < 250:  # Valid HR range
+                    self.hr_data.append({
+                        'sequence': sequence,
+                        'packet_index': packet_hr_count,
+                        'hr_bpm': hr_value,
+                        'session_utc': session_utc,  # Tag with session
+                    })
+                    packet_hr_count += 1
+            
+            # Update progress (print every 1000 values)
+            if packet_hr_count > 0:
+                total_hr = len(self.hr_data)
+                if total_hr % 1000 == 0:
+                    print(f"    ... {total_hr} HR values...")
                 
         except Exception as e:
             print(f"Parse HR data error: {e}")
@@ -254,15 +276,22 @@ class CL837HRMonitor:
 
     def checksum(self, data):
         """Calculate checksum used by Chileaf protocol.
-
-        The official SDKs compute a simple byte-wise sum (mod 256) as checksum
-        rather than XOR. Replace XOR with sum to match device expectations.
+        
+        From decompiled Android SDK (FitnessManager.java line 174):
+        protected byte checkSum(final byte[] data) {
+            int result = 0;
+            for (byte item : data) {
+                result += item;
+            }
+            return (byte) (((-result) ^ 58) & 255);
+        }
+        
+        Formula: ((0 - sum(data)) ^ 0x3A) & 0xFF
         """
-        checksum = 0
+        result = 0
         for byte in data:
-            # ensure byte treated as int
-            checksum = (checksum + (byte & 0xFF)) & 0xFF
-        return checksum
+            result += (byte & 0xFF)
+        return ((-result) ^ 0x3A) & 0xFF
 
     async def send_command(self, cmd, params=None):
         """Send command to device"""
@@ -337,12 +366,14 @@ class CL837HRMonitor:
             print(f"Get HR records error: {e}")
             return False
 
-    async def get_hr_data(self, utc_timestamp):
+    async def get_hr_data(self, utc_timestamp, session_name=""):
         """Request HR data for specific timestamp"""
         try:
-            print(f"\nRequesting HR data for {datetime.utcfromtimestamp(utc_timestamp).strftime('%Y-%m-%d %H:%M:%S')}...")
-            self.hr_data = []
+            dt = datetime.fromtimestamp(utc_timestamp)
+            print(f"\nDownloading HR data for {dt.strftime('%Y-%m-%d %H:%M:%S')}...")
+            # Don't reset self.hr_data here - accumulate across sessions
             self.hr_data_complete = False
+            self._current_session_utc = utc_timestamp  # Track current session for tagging
             
             # Convert timestamp to bytes
             utc_bytes = [
@@ -355,15 +386,27 @@ class CL837HRMonitor:
             
             await self.send_command(self.CMD_GET_HR_DATA, utc_bytes)
             
-            # Wait for data to download (max 30 seconds)
-            timeout = 30
+            # Wait for data to download - SDK sends 0x23 when complete
+            timeout = 60  # Max 60 seconds for large datasets
             start_time = time.time()
             
             while not self.hr_data_complete:
                 await asyncio.sleep(0.1)
-                if time.time() - start_time > timeout:
-                    print("✗ Timeout waiting for HR data")
-                    return False
+                
+                elapsed = time.time() - start_time
+                
+                # Progress every 5 seconds
+                if int(elapsed) % 5 == 0 and int(elapsed) > 0 and len(self.hr_data) > 0:
+                    print(f"    ... {len(self.hr_data)} HR values downloaded")
+                
+                # Hard timeout
+                if elapsed > timeout:
+                    if len(self.hr_data) > 0:
+                        print(f"  ⚠ Timeout but got {len(self.hr_data)} values")
+                        return True
+                    else:
+                        print("  ✗ Timeout - no data received")
+                        return False
             
             return True
             
@@ -371,57 +414,73 @@ class CL837HRMonitor:
             print(f"Get HR data error: {e}")
             return False
 
-    def export_to_csv(self):
-        """Export HR data to CSV file"""
+    def export_to_csv(self, selected_date, selected_records):
+        """Export HR data to CSV file for selected day"""
         try:
-            if not self.hr_records:
+            if not self.hr_data:
                 print("\nNo HR data to export")
                 return
             
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"hr_history_{timestamp}.csv"
+            # Create filename with date
+            date_str = selected_date.strftime("%Y%m%d")
+            filename = f"hr_history_{date_str}.csv"
+            
+            # Calculate time offset per HR value (typically 1 minute intervals)
+            # Based on typical HR monitoring: ~128 values per packet, multiple packets per session
             
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
                 
                 # Header
                 writer.writerow([
-                    'record_number',
-                    'utc_timestamp',
-                    'datetime_utc',
-                    'measurement_count',
-                    'avg_bpm',
-                    'min_bpm',
-                    'max_bpm'
+                    'datetime',
+                    'hr_bpm',
+                    'session_start',
+                    'minute_offset'
                 ])
                 
-                # Data rows
-                for i, record in enumerate(self.hr_records, 1):
-                    # Filter data for this record (if we downloaded detailed data)
-                    record_data = [d for d in self.hr_data if d.get('record_utc') == record['utc']]
+                # Sort data by session and index
+                sorted_data = sorted(self.hr_data, key=lambda x: (x.get('session_utc', 0), x.get('packet_index', 0)))
+                
+                current_session = None
+                minute_offset = 0
+                
+                for data_point in sorted_data:
+                    session_utc = data_point.get('session_utc', 0)
                     
-                    if record_data:
-                        hr_values = [d['hr_bpm'] for d in record_data if d['hr_bpm'] > 0]
-                        avg_bpm = sum(hr_values) / len(hr_values) if hr_values else 0
-                        min_bpm = min(hr_values) if hr_values else 0
-                        max_bpm = max(hr_values) if hr_values else 0
-                        count = len(record_data)
-                    else:
-                        avg_bpm = min_bpm = max_bpm = count = 0
+                    # Reset offset for new session
+                    if session_utc != current_session:
+                        current_session = session_utc
+                        minute_offset = 0
+                        session_dt = datetime.fromtimestamp(session_utc)
+                    
+                    # Calculate timestamp for this HR value
+                    hr_dt = session_dt + timedelta(minutes=minute_offset)
                     
                     writer.writerow([
-                        i,
-                        record['utc'],
-                        record['datetime'],
-                        count,
-                        f"{avg_bpm:.1f}" if avg_bpm > 0 else "N/A",
-                        min_bpm if min_bpm > 0 else "N/A",
-                        max_bpm if max_bpm > 0 else "N/A"
+                        hr_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                        data_point['hr_bpm'],
+                        session_dt.strftime('%H:%M:%S'),
+                        minute_offset
                     ])
+                    
+                    minute_offset += 1
             
-            print(f"\n✓ Data exported to: {filename}")
-            print(f"  Records: {len(self.hr_records)}")
-            print(f"  Measurements: {len(self.hr_data)}")
+            # Calculate stats
+            hr_values = [d['hr_bpm'] for d in self.hr_data]
+            avg_hr = sum(hr_values) / len(hr_values) if hr_values else 0
+            min_hr = min(hr_values) if hr_values else 0
+            max_hr = max(hr_values) if hr_values else 0
+            
+            print(f"\n{'='*50}")
+            print(f"✓ Exported to: {filename}")
+            print(f"  Date: {selected_date.strftime('%Y-%m-%d')}")
+            print(f"  Sessions: {len(selected_records)}")
+            print(f"  Total HR values: {len(self.hr_data)}")
+            print(f"  Average HR: {avg_hr:.0f} BPM")
+            print(f"  Min HR: {min_hr} BPM")
+            print(f"  Max HR: {max_hr} BPM")
+            print(f"{'='*50}")
             
         except Exception as e:
             print(f"Export error: {e}")
@@ -460,22 +519,68 @@ class CL837HRMonitor:
                 await self.disconnect()
                 return
             
-            # 5. Optionally download detailed data for each record
+            # 5. Group records by day
             if self.hr_records:
-                print(f"\nFound {len(self.hr_records)} HR records")
-                download_details = input("Download detailed HR data for all records? (y/n): ").lower()
+                days = {}
+                for record in self.hr_records:
+                    dt = datetime.fromtimestamp(record['utc'])
+                    day_key = dt.strftime('%Y-%m-%d')
+                    if day_key not in days:
+                        days[day_key] = []
+                    days[day_key].append(record)
                 
-                if download_details == 'y':
-                    for i, record in enumerate(self.hr_records, 1):
-                        print(f"\n[{i}/{len(self.hr_records)}] Processing record...")
-                        if await self.get_hr_data(record['utc']):
-                            # Mark data with record UTC for CSV export
-                            for data_point in self.hr_data:
-                                data_point['record_utc'] = record['utc']
-                        await asyncio.sleep(0.5)
-            
-            # 6. Export to CSV
-            self.export_to_csv()
+                # Show available days
+                print(f"\n{'='*50}")
+                print("Available days with HR data:")
+                print(f"{'='*50}")
+                sorted_days = sorted(days.keys(), reverse=True)
+                for i, day in enumerate(sorted_days, 1):
+                    records = days[day]
+                    print(f"  {i}. {day} ({len(records)} sessions)")
+                    for rec in records:
+                        rec_dt = datetime.fromtimestamp(rec['utc'])
+                        print(f"      - {rec_dt.strftime('%H:%M:%S')}")
+                
+                print(f"\n  0. Exit without download")
+                
+                # Select day
+                while True:
+                    try:
+                        choice = input(f"\nSelect day to download (1-{len(sorted_days)}, or 0 to exit): ")
+                        choice = int(choice)
+                        if choice == 0:
+                            print("Exiting...")
+                            await self.disconnect()
+                            return
+                        if 1 <= choice <= len(sorted_days):
+                            selected_day = sorted_days[choice - 1]
+                            selected_records = days[selected_day]
+                            break
+                        else:
+                            print(f"Please enter 0-{len(sorted_days)}")
+                    except ValueError:
+                        print("Please enter a number")
+                
+                # Download data for selected day
+                selected_date = datetime.strptime(selected_day, '%Y-%m-%d')
+                print(f"\nDownloading HR data for {selected_day}...")
+                print(f"Sessions to download: {len(selected_records)}")
+                
+                self.hr_data = []  # Reset
+                
+                for i, record in enumerate(selected_records, 1):
+                    rec_dt = datetime.fromtimestamp(record['utc'])
+                    print(f"\n[{i}/{len(selected_records)}] Session {rec_dt.strftime('%H:%M:%S')}...")
+                    
+                    data_before = len(self.hr_data)
+                    if await self.get_hr_data(record['utc']):
+                        session_count = len(self.hr_data) - data_before
+                        print(f"  ✓ Got {session_count} HR values")
+                    
+                    await asyncio.sleep(0.3)
+                
+                # 6. Export to CSV
+                self.export_to_csv(selected_date, selected_records)
             
             # 7. Disconnect
             await self.disconnect()

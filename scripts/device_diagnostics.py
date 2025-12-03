@@ -208,11 +208,13 @@ class CL837Diagnostics:
             print(f"Notification error: {e}")
 
     def checksum(self, data):
-        """Calculate checksum (XOR of all bytes)"""
-        checksum = 0
-        for byte in data:
-            checksum ^= byte
-        return checksum
+        """Calculate Chileaf protocol checksum.
+        
+        From decompiled SDK (FitnessManager.java):
+        return (byte) (((-result) ^ 58) & 255);
+        """
+        result = sum(byte & 0xFF for byte in data)
+        return ((-result) ^ 0x3A) & 0xFF
 
     async def send_command(self, cmd, params=None):
         """Send command to device"""
