@@ -33,6 +33,7 @@ class CL837SportMonitor:
         # Sport data storage
         self.sport_records = []
         self.sport_complete = False
+        self.sport_packets = []  # Accumulate packets until END_TAG
         
         # Notification characteristics
         self.tx_char = None
@@ -165,50 +166,87 @@ class CL837SportMonitor:
             traceback.print_exc()
 
     def parse_sport_response(self, data):
-        """Parse sport history response"""
+        """Parse sport history response.
+        
+        CL837 sends all sport data in a single packet (no END_TAG like CL833):
+        - Packet: [0xFF, len, 0x16, payload..., checksum]
+        - Payload = (len - 4) bytes of sport records
+        - Sport record format (10 bytes each):
+          - stamp: 4 bytes (BIG-endian UTC timestamp)
+          - step: 3 bytes (BIG-endian)
+          - calorie: 3 bytes (BIG-endian) - value in 0.1 cal units
+        """
         try:
-            if len(data) < 5:
+            if len(data) < 7:
                 return
             
-            # Check if this is the end marker
-            if len(data) == 5 and data[3] == 0xFF and data[4] == 0xFF:
-                self.sport_complete = True
-                print(f"\n✓ Sport history download complete ({len(self.sport_records)} days)")
-                return
+            # Print raw data for debug
+            hex_str = ' '.join(f'{b:02X}' for b in data)
+            print(f"  [DEBUG] RX ({len(data)} bytes): {hex_str}")
             
-            # Parse sport record: Based on HistoryOfSport.java
-            # Format: [header, length, cmd, utc(4), step(4), distance(4), calorie(4)]
-            if len(data) >= 19:
-                # UTC timestamp (4 bytes)
-                utc_bytes = data[3:7]
-                utc_timestamp = struct.unpack('>I', bytes(utc_bytes))[0]
+            # Extract payload: skip header(1), len(1), cmd(1) and checksum(1)
+            # payload = data[3:-1]
+            payload = data[3:-1] if len(data) > 4 else data[3:]
+            
+            hex_payload = ' '.join(f'{b:02X}' for b in payload)
+            print(f"  [DEBUG] Payload ({len(payload)} bytes): {hex_payload}")
+            
+            # Parse 10-byte records directly
+            record_size = 10
+            num_records = len(payload) // record_size
+            
+            print(f"  [DEBUG] Parsing {num_records} records...")
+            
+            for i in range(num_records):
+                offset = i * record_size
                 
-                # Step count (4 bytes)
-                step_bytes = data[7:11]
-                steps = struct.unpack('>I', bytes(step_bytes))[0]
+                # BIG-ENDIAN parsing (SDK getLongParse does val << 8 | byte)
+                stamp = ((payload[offset] << 24) | 
+                        (payload[offset+1] << 16) | 
+                        (payload[offset+2] << 8) | 
+                        payload[offset+3])
                 
-                # Distance (4 bytes) - in meters
-                dist_bytes = data[11:15]
-                distance = struct.unpack('>I', bytes(dist_bytes))[0]
+                step = ((payload[offset+4] << 16) | 
+                       (payload[offset+5] << 8) | 
+                       payload[offset+6])
                 
-                # Calories (4 bytes)
-                cal_bytes = data[15:19]
-                calories = struct.unpack('>I', bytes(cal_bytes))[0]
+                calorie_raw = ((payload[offset+7] << 16) | 
+                              (payload[offset+8] << 8) | 
+                              payload[offset+9])
+                calorie = calorie_raw / 10.0
+                
+                # Debug print raw values
+                raw_hex = ' '.join(f'{payload[offset+j]:02X}' for j in range(10))
+                print(f"  [DEBUG] Record {i}: {raw_hex} -> stamp={stamp} (0x{stamp:08X}), step={step}, cal_raw={calorie_raw}")
+                
+                # Skip invalid records
+                if stamp == 0 or stamp == 0xFFFFFFFF:
+                    print(f"  [DEBUG] Skipping invalid record {i}")
+                    continue
+                
+                try:
+                    dt = datetime.fromtimestamp(stamp)
+                    dt_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    date_str = dt.strftime('%Y-%m-%d')
+                except Exception as e:
+                    print(f"  [DEBUG] Invalid timestamp {stamp}: {e}")
+                    continue
                 
                 sport_record = {
-                    'utc': utc_timestamp,
-                    'datetime': datetime.utcfromtimestamp(utc_timestamp).strftime('%Y-%m-%d %H:%M:%S'),
-                    'date': datetime.utcfromtimestamp(utc_timestamp).strftime('%Y-%m-%d'),
-                    'steps': steps,
-                    'distance_m': distance,
-                    'distance_km': distance / 1000.0,
-                    'calories': calories
+                    'utc': stamp,
+                    'datetime': dt_str,
+                    'date': date_str,
+                    'steps': step,
+                    'calories': calorie
                 }
                 
                 self.sport_records.append(sport_record)
-                
-                print(f"  Day {len(self.sport_records)}: {sport_record['date']} - "
-                      f"{steps} steps, {distance}m, {calories} cal")
+                print(f"  Day {len(self.sport_records)}: {dt_str} - {step:,} steps, {calorie:.1f} cal")
+            
+            # Mark complete after parsing
+            if num_records > 0:
+                self.sport_complete = True
+                print(f"\n✓ Sport history download complete ({len(self.sport_records)} days)")
                 
         except Exception as e:
             print(f"Parse sport response error: {e}")
@@ -276,6 +314,7 @@ class CL837SportMonitor:
         try:
             print("\nRequesting 7-day sport history...")
             self.sport_records = []
+            self.sport_packets = []
             self.sport_complete = False
             
             await self.send_command(self.CMD_GET_SPORT_HISTORY, [0x00])
@@ -316,8 +355,6 @@ class CL837SportMonitor:
                     'datetime_utc',
                     'date',
                     'steps',
-                    'distance_m',
-                    'distance_km',
                     'calories'
                 ])
                 
@@ -329,8 +366,6 @@ class CL837SportMonitor:
                         record['datetime'],
                         record['date'],
                         record['steps'],
-                        record['distance_m'],
-                        f"{record['distance_km']:.2f}",
                         record['calories']
                     ])
             
@@ -341,12 +376,10 @@ class CL837SportMonitor:
             
             if self.sport_records:
                 total_steps = sum(r['steps'] for r in self.sport_records)
-                total_distance = sum(r['distance_km'] for r in self.sport_records)
                 total_calories = sum(r['calories'] for r in self.sport_records)
                 avg_steps = total_steps / len(self.sport_records)
                 
                 print(f"  Total steps: {total_steps:,}")
-                print(f"  Total distance: {total_distance:.2f} km")
                 print(f"  Total calories: {total_calories:,}")
                 print(f"  Average steps/day: {avg_steps:.0f}")
                 
