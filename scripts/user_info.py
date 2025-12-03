@@ -353,7 +353,7 @@ class CL837UserInfoManager:
         while True:
             sex_input = input("Sex (m/f): ").lower()
             if sex_input in ['m', 'f']:
-                sex = 0 if sex_input == 'm' else 1
+                sex = 1 if sex_input == 'm' else 0  # SDK: Male=1, Female=0
                 break
             print("Enter 'm' for male or 'f' for female")
         
