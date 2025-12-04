@@ -3,9 +3,14 @@
 Sleep Data Visualization - CL837 Fitness Tracker
 Genera grafici matplotlib dell'andamento del sonno
 
+Funzionalità principali:
+- Grafici a torta per ogni notte con fasi del sonno
+- Orario di addormentamento e sveglia per ogni notte
+- Durata totale ed efficienza del sonno
+- Classificazione fasi basata su SDK Chileaf (activity_indices)
+
 Logica di aggregazione:
 - Notte = tutto il sonno tra 18:00 giorno X e 18:00 giorno X+1
-- Classificazione fasi basata su SDK Chileaf (activity_indices)
 """
 
 import pandas as pd
@@ -111,35 +116,135 @@ def get_night_label(night_date) -> str:
     next_day = night_date + timedelta(days=1)
     return f"{night_date.strftime('%d')}→{next_day.strftime('%d %b')}"
 
-def plot_sleep_stages_bar(df: pd.DataFrame, output_path: str = None):
+
+def format_duration(minutes: int) -> str:
+    """Formatta durata in ore e minuti"""
+    hours = minutes // 60
+    mins = minutes % 60
+    if hours > 0:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+
+def plot_night_pies(df: pd.DataFrame, output_path: str = None):
     """
-    Grafico a barre impilate: Deep Sleep vs Light Sleep vs Awake per ogni record
+    Genera grafici a torta per ogni notte con:
+    - Fasi del sonno (Deep, Light, Awake)
+    - Orario di addormentamento e sveglia
+    - Durata totale ed efficienza
     """
-    fig, ax = plt.subplots(figsize=(14, 6))
+    # Aggrega per notte
+    nights_data = []
     
-    x = range(len(df))
-    width = 0.8
+    for night_date in sorted(df['sleep_night'].unique()):
+        night_df = df[df['sleep_night'] == night_date].sort_values('datetime_utc')
+        
+        if len(night_df) == 0:
+            continue
+        
+        # Calcola totali per la notte
+        deep = night_df['deep_sleep_sdk'].sum()
+        light = night_df['light_sleep_sdk'].sum()
+        awake = night_df['awake_sdk'].sum()
+        total = deep + light + awake
+        
+        if total == 0:
+            continue
+        
+        # Orari di addormentamento e sveglia
+        bedtime = night_df['datetime_utc'].min()
+        # Calcola wake time: ultimo record + sua durata
+        last_record = night_df.iloc[-1]
+        wake_time = last_record['datetime_utc'] + timedelta(minutes=int(last_record['duration_minutes']))
+        
+        # Efficienza del sonno
+        sleep_time = deep + light
+        efficiency = (sleep_time / total * 100) if total > 0 else 0
+        
+        nights_data.append({
+            'night_date': night_date,
+            'label': get_night_label(night_date),
+            'deep': int(deep),
+            'light': int(light),
+            'awake': int(awake),
+            'total': int(total),
+            'bedtime': bedtime,
+            'wake_time': wake_time,
+            'efficiency': efficiency
+        })
     
-    # Barre impilate
-    bars_deep = ax.bar(x, df['deep_sleep_min'], width, label='Deep Sleep', color='#1a237e', alpha=0.9)
-    bars_light = ax.bar(x, df['light_sleep_min'], width, bottom=df['deep_sleep_min'], 
-                        label='Light Sleep', color='#42a5f5', alpha=0.9)
-    bars_awake = ax.bar(x, df['awake_min'], width, 
-                        bottom=df['deep_sleep_min'] + df['light_sleep_min'],
-                        label='Awake', color='#ff7043', alpha=0.9)
+    if not nights_data:
+        print("No valid night data to plot")
+        return None, None
     
-    ax.set_xlabel('Sleep Record', fontsize=11)
-    ax.set_ylabel('Minutes', fontsize=11)
-    ax.set_title('Sleep Stages per Record', fontsize=14, fontweight='bold')
-    ax.legend(loc='upper right')
+    # Determina layout griglia
+    n_nights = len(nights_data)
+    cols = min(3, n_nights)
+    rows = (n_nights + cols - 1) // cols
     
-    # X labels con date
-    labels = [d.strftime('%m/%d\n%H:%M') for d in df['datetime_utc']]
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 6 * rows))
+    fig.suptitle('Sleep Analysis by Night', fontsize=16, fontweight='bold', y=1.02)
     
-    ax.set_ylim(0, max(df['duration_minutes']) + 10)
-    ax.grid(axis='y', alpha=0.3)
+    # Flatten axes per iterazione facile
+    if n_nights == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten() if hasattr(axes, 'flatten') else [axes]
+    
+    # Colori
+    colors = ['#1a237e', '#42a5f5', '#ff7043']  # Deep, Light, Awake
+    
+    for idx, night in enumerate(nights_data):
+        ax = axes[idx]
+        
+        # Dati per la torta
+        sizes = [night['deep'], night['light'], night['awake']]
+        labels_pie = ['Deep', 'Light', 'Awake']
+        
+        # Rimuovi fette con 0
+        non_zero = [(s, l, c) for s, l, c in zip(sizes, labels_pie, colors) if s > 0]
+        if non_zero:
+            sizes, labels_pie, pie_colors = zip(*non_zero)
+        else:
+            continue
+        
+        # Grafico a torta
+        wedges, texts, autotexts = ax.pie(
+            sizes, 
+            labels=None,  # Mettiamo le label nella legenda
+            autopct=lambda pct: f'{pct:.0f}%' if pct > 5 else '',
+            colors=pie_colors,
+            startangle=90,
+            explode=[0.02] * len(sizes),
+            shadow=True,
+            textprops={'fontsize': 10, 'fontweight': 'bold', 'color': 'white'}
+        )
+        
+        # Titolo con data notte
+        ax.set_title(f"Night {night['label']}", fontsize=14, fontweight='bold', pad=10)
+        
+        # Legenda con durate
+        legend_labels = []
+        for label, size in zip(labels_pie, sizes):
+            legend_labels.append(f"{label}: {format_duration(size)}")
+        
+        ax.legend(wedges, legend_labels, loc='upper left', fontsize=9)
+        
+        # Info sotto il grafico
+        info_text = (
+            f"Bedtime: {night['bedtime'].strftime('%H:%M')}\n"
+            f"Wake: {night['wake_time'].strftime('%H:%M')}\n"
+            f"Total: {format_duration(night['total'])}\n"
+            f"Efficiency: {night['efficiency']:.0f}%"
+        )
+        
+        ax.text(0.5, -0.15, info_text, transform=ax.transAxes, 
+                fontsize=10, ha='center', va='top',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgray', alpha=0.3))
+    
+    # Nascondi assi vuoti
+    for idx in range(n_nights, len(axes)):
+        axes[idx].set_visible(False)
     
     plt.tight_layout()
     
@@ -147,7 +252,65 @@ def plot_sleep_stages_bar(df: pd.DataFrame, output_path: str = None):
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"Saved: {output_path}")
     
-    return fig, ax
+    return fig, axes
+
+def plot_sleep_summary_table(df: pd.DataFrame, output_path: str = None):
+    """
+    Tabella riassuntiva testuale di tutte le notti
+    """
+    # Aggrega per notte
+    nights_data = []
+    
+    for night_date in sorted(df['sleep_night'].unique()):
+        night_df = df[df['sleep_night'] == night_date].sort_values('datetime_utc')
+        
+        if len(night_df) == 0:
+            continue
+        
+        deep = night_df['deep_sleep_sdk'].sum()
+        light = night_df['light_sleep_sdk'].sum()
+        awake = night_df['awake_sdk'].sum()
+        total = deep + light + awake
+        
+        if total == 0:
+            continue
+        
+        bedtime = night_df['datetime_utc'].min()
+        last_record = night_df.iloc[-1]
+        wake_time = last_record['datetime_utc'] + timedelta(minutes=int(last_record['duration_minutes']))
+        
+        sleep_time = deep + light
+        efficiency = (sleep_time / total * 100) if total > 0 else 0
+        
+        nights_data.append({
+            'Night': get_night_label(night_date),
+            'Bedtime': bedtime.strftime('%H:%M'),
+            'Wake': wake_time.strftime('%H:%M'),
+            'Total': format_duration(int(total)),
+            'Deep': format_duration(int(deep)),
+            'Light': format_duration(int(light)),
+            'Awake': format_duration(int(awake)),
+            'Eff%': f"{efficiency:.0f}%"
+        })
+    
+    if not nights_data:
+        print("No night data for summary")
+        return
+    
+    # Stampa tabella
+    print("\n" + "="*80)
+    print("SLEEP SUMMARY BY NIGHT")
+    print("="*80)
+    
+    # Header
+    print(f"{'Night':<15} {'Bedtime':<8} {'Wake':<8} {'Total':<10} {'Deep':<10} {'Light':<10} {'Awake':<8} {'Eff%':<6}")
+    print("-"*80)
+    
+    for night in nights_data:
+        print(f"{night['Night']:<15} {night['Bedtime']:<8} {night['Wake']:<8} {night['Total']:<10} {night['Deep']:<10} {night['Light']:<10} {night['Awake']:<8} {night['Eff%']:<6}")
+    
+    print("="*80)
+
 
 def plot_sleep_quality_timeline(df: pd.DataFrame, output_path: str = None):
     """
@@ -412,20 +575,23 @@ def main():
     print(f"Loaded {len(df)} sleep records")
     print(f"Date range: {df['datetime_utc'].min()} to {df['datetime_utc'].max()}")
     
+    # Mostra tabella riassuntiva
+    plot_sleep_summary_table(df)
+    
     # Genera tutti i grafici
     output_dir = sleep_dir / "plots"
     output_dir.mkdir(exist_ok=True)
     
     print("\n📊 Generating sleep charts...")
     
-    # 1. Fasi del sonno per record
-    plot_sleep_stages_bar(df, str(output_dir / "sleep_stages_bar.png"))
+    # 1. PRINCIPALE: Grafici a torta per notte
+    plot_night_pies(df, str(output_dir / "night_pies.png"))
     
-    # 2. Qualità nel tempo
-    plot_sleep_quality_timeline(df, str(output_dir / "sleep_quality_timeline.png"))
-    
-    # 3. Sommario giornaliero
+    # 2. Sommario giornaliero (bar chart)
     plot_daily_summary(df, str(output_dir / "daily_summary.png"))
+    
+    # 3. Qualità nel tempo
+    plot_sleep_quality_timeline(df, str(output_dir / "sleep_quality_timeline.png"))
     
     # 4. Attività durante il sonno
     plot_activity_heatmap(df, str(output_dir / "activity_heatmap.png"))

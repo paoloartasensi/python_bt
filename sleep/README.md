@@ -1,10 +1,12 @@
 # CL837 Sleep Data & UTC Sync System
 
-Complete sleep data management system for CL837/CL831 devices with automatic UTC synchronization and data validation.
+Complete sleep data management system for CL837/CL831 devices with automatic UTC synchronization, data validation, and visualization.
 
 ## 📁 Files
 
 - **`sleep.py`** - Unified script for UTC sync and sleep data download
+- **`debug_sleep.py`** - Debug script to view ALL records (including filtered invalid ones)
+- **`plot_sleep.py`** - Sleep data visualization with pie charts per night
 - **`README.md`** - This file (documentation)
 
 ## 🎯 Overview
@@ -119,8 +121,9 @@ python sleep/sleep.py
 2. ✅ **Automatically syncs UTC time first**
 3. ✅ Downloads all sleep records
 4. ✅ Validates timestamps (filters invalid data)
-5. ✅ Analyzes sleep stages (deep/light/awake)
-6. ✅ Exports to CSV with timestamp
+5. ✅ **Groups records into sleep sessions** (gap > 3h = new session)
+6. ✅ Analyzes sleep stages (deep/light/awake) per session
+7. ✅ Exports to CSV with timestamp
 
 **Example output:**
 ```
@@ -129,43 +132,47 @@ CL837 SLEEP DATA DOWNLOAD
 ======================================================================
 
 🔍 Scanning for CL837 devices...
-📱 Found: CL837-0759665
+📱 Found: CL837-0759364
 🔗 Connecting...
-✅ Connected to CL837-0759665
+✅ Connected to CL837-0759364
 
 ⏰ Syncing UTC time...
-   UTC: 2025-11-09 08:47:09
-   Timestamp: 1762678029
+   UTC: 2025-12-04 10:00:15
+   Timestamp: 1764842415
 ✅ UTC sync confirmed by device
 
 💤 Requesting sleep data...
 ⏳ Waiting for data...
 ✅ Sleep data received
 
-⚠️  Filtered out 9 invalid record(s)
-✅ 7 valid record(s)
+⚠️  Filtered out 43 invalid record(s)
+✅ 50 valid record(s)
 
 ======================================================================
 SLEEP DATA ANALYSIS
 ======================================================================
 
-Record 1:
-  📅 2025-10-21 21:49 UTC
-  ⏱️  Duration: 20 min (4 intervals)
-  🌙 Deep sleep: 20 min
-  💤 Light sleep: 0 min
-  👁️  Awake: 0 min
+📊 Found 4 sleep session(s), 50 record(s)
 
-Record 2:
-  📅 2025-10-21 22:06 UTC
-  ⏱️  Duration: 40 min (8 intervals)
-  🌙 Deep sleep: 40 min
-  💤 Light sleep: 0 min
-  👁️  Awake: 0 min
+──────────────────────────────────────────────────────────────────────
+SESSION 1: 2025-11-07 20:25 → 23:25 UTC
+──────────────────────────────────────────────────────────────────────
+  📊 Total tracked: 195 min (3h 15m)
+  🌙 Deep sleep:    120 min (2h 0m)
+  💤 Light sleep:   60 min (1h 0m)
+  👁️  Awake:         15 min
+  📦 Records:       4
 
-...
+──────────────────────────────────────────────────────────────────────
+SESSION 2: 2025-12-02 23:25 → 06:25 UTC
+──────────────────────────────────────────────────────────────────────
+  📊 Total tracked: 420 min (7h 0m)
+  🌙 Deep sleep:    180 min (3h 0m)
+  💤 Light sleep:   200 min (3h 20m)
+  👁️  Awake:         40 min
+  📦 Records:       12
 
-📄 Data exported to: sleep_data_20251109_094710.csv
+📄 Data exported to: sleep_data_20251204_110015.csv
 
 🔌 Disconnected
 
@@ -173,6 +180,73 @@ Record 2:
 ✅ SLEEP DATA DOWNLOAD COMPLETED
 ======================================================================
 ```
+
+### Option 3: Debug All Records (Including Invalid)
+
+```powershell
+python sleep/debug_sleep.py
+```
+
+**When to use:**
+- Investigating missing data
+- Verifying device is recording correctly
+- Checking raw timestamps before filtering
+
+**Shows ALL 93 records** including those filtered as invalid (wrong timestamps, future dates, etc.)
+
+### Option 4: Visualize Sleep Data
+
+```powershell
+python sleep/plot_sleep.py
+```
+
+**What it does:**
+1. ✅ Loads most recent CSV export
+2. ✅ Groups records into nights (18:00→18:00 logic)
+3. ✅ **Generates pie chart per night** with sleep phases
+4. ✅ Shows bedtime and wake-up time for each night
+5. ✅ Calculates sleep efficiency percentage
+6. ✅ Saves charts to `plots/` folder
+
+## 📊 Data Visualization
+
+### Pie Charts per Night
+
+The `plot_sleep.py` script generates intuitive pie charts for each night:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│          Night 3→4 Dec 2025                             │
+│                                                         │
+│              🌙 Deep: 45%                               │
+│           ┌────────────┐                                │
+│          ╱   Deep      ╲     💤 Light: 42%              │
+│         │    Sleep     │                                │
+│          ╲   (3h 15m)  ╱     👁️ Awake: 13%              │
+│           └────────────┘                                │
+│                                                         │
+│  🛏️ Bedtime: 22:25    ⏰ Wake: 08:25                    │
+│  📊 Total: 7h 15m     💯 Efficiency: 87%               │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Chart Features
+
+| Feature | Description |
+|---------|-------------|
+| **Pie chart per night** | Visual breakdown of sleep phases |
+| **Sleep/wake times** | Extracted from first/last record |
+| **Total duration** | Sum of all phases |
+| **Sleep efficiency** | (Deep + Light) / Total × 100 |
+| **Color coding** | Deep=navy, Light=blue, Awake=orange |
+
+### Output Files
+
+Charts are saved to `sleep/plots/`:
+- `night_pies.png` - Grid of pie charts for all nights
+- `daily_summary.png` - Bar chart comparison
+- `activity_heatmap.png` - Movement patterns
+- `hypnogram.png` - Classic sleep stage timeline
 
 ## 📊 Data Validation
 
@@ -676,6 +750,12 @@ python sleep/sleep.py -s
 # Full download with automatic UTC sync (15-30 seconds)
 python sleep/sleep.py
 
+# Debug: view ALL records including invalid
+python sleep/debug_sleep.py
+
+# Visualize sleep data with pie charts
+python sleep/plot_sleep.py
+
 # Show help
 python sleep/sleep.py --help
 ```
@@ -711,13 +791,22 @@ python sleep/sleep.py --help
 ## 📚 Dependencies
 
 ```bash
-pip install bleak
+pip install bleak pandas matplotlib numpy
 ```
 
-**Bleak** - Cross-platform Bluetooth Low Energy library
-- Windows: Uses native Windows BLE stack
-- macOS: Uses Core Bluetooth
-- Linux: Uses BlueZ
+- **Bleak** - Cross-platform Bluetooth Low Energy library
+- **Pandas** - Data manipulation and CSV handling
+- **Matplotlib** - Chart generation
+- **NumPy** - Numerical operations
+
+## ⚡ Performance
+
+| Operation | Time | Details |
+|-----------|------|---------|
+| UTC Sync Only | 3-5s | Scan + Connect + Sync + Disconnect |
+| Full Download | 15-30s | Includes UTC sync + Data download + Analysis + CSV |
+| BLE Connection | ~2s | Device scanning + connection |
+| Data Transfer | ~10-20s | Depends on number of sleep records |
 
 ## 🔐 Privacy & Data Storage
 
@@ -749,4 +838,4 @@ pip install bleak
 
 ---
 
-**Last updated:** November 9, 2025
+**Last updated:** December 4, 2025

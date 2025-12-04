@@ -335,7 +335,7 @@ class CL837SleepManager:
         return deep_sleep, light_sleep, awake
 
     def analyze_and_display(self):
-        """Analyze and display sleep data"""
+        """Analyze and display sleep data, grouped by night"""
         if not self.sleep_data:
             print("\n⚠️  No sleep data available")
             return
@@ -346,27 +346,61 @@ class CL837SleepManager:
             print("\n⚠️  No valid sleep data after filtering")
             return
         
-        print(f"\n{'='*70}")
-        print("SLEEP DATA ANALYSIS")
-        print(f"{'='*70}\n")
+        # Sort by timestamp
+        self.sleep_data.sort(key=lambda x: x['utc'])
         
-        for i, record in enumerate(self.sleep_data, 1):
-            # Analyze stages
+        # Pre-analyze all records
+        for record in self.sleep_data:
             deep, light, awake = self.analyze_sleep_stages(record['activity_indices'])
-            
-            # Store for CSV export
             record['deep_sleep_min'] = deep * 5
             record['light_sleep_min'] = light * 5
             record['awake_min'] = awake * 5
+        
+        # Group records into sleep sessions (gap > 3 hours = new session)
+        sessions = []
+        current_session = []
+        
+        for record in self.sleep_data:
+            if not current_session:
+                current_session.append(record)
+            else:
+                last_utc = current_session[-1]['utc']
+                last_duration = current_session[-1]['count'] * 5 * 60  # in seconds
+                gap = record['utc'] - (last_utc + last_duration)
+                
+                # If gap > 3 hours, start new session
+                if gap > 3 * 3600:
+                    sessions.append(current_session)
+                    current_session = [record]
+                else:
+                    current_session.append(record)
+        
+        if current_session:
+            sessions.append(current_session)
+        
+        print(f"\n{'='*70}")
+        print("SLEEP DATA ANALYSIS")
+        print(f"{'='*70}")
+        print(f"\n📊 Found {len(sessions)} sleep session(s), {len(self.sleep_data)} record(s)\n")
+        
+        for session_idx, session in enumerate(sessions, 1):
+            # Calculate session totals
+            session_deep = sum(r['deep_sleep_min'] for r in session)
+            session_light = sum(r['light_sleep_min'] for r in session)
+            session_awake = sum(r['awake_min'] for r in session)
+            session_total = session_deep + session_light + session_awake
             
-            # Display
-            duration = record['count'] * 5
-            print(f"Record {i}:")
-            print(f"  📅 {record['datetime'].strftime('%Y-%m-%d %H:%M')} UTC")
-            print(f"  ⏱️  Duration: {duration} min ({record['count']} intervals)")
-            print(f"  🌙 Deep sleep: {deep * 5} min")
-            print(f"  💤 Light sleep: {light * 5} min")
-            print(f"  👁️  Awake: {awake * 5} min")
+            start_time = session[0]['datetime']
+            end_time = session[-1]['datetime']
+            
+            print(f"{'─'*70}")
+            print(f"SESSION {session_idx}: {start_time.strftime('%Y-%m-%d %H:%M')} → {end_time.strftime('%H:%M')} UTC")
+            print(f"{'─'*70}")
+            print(f"  📊 Total tracked: {session_total} min ({session_total // 60}h {session_total % 60}m)")
+            print(f"  🌙 Deep sleep:    {session_deep} min ({session_deep // 60}h {session_deep % 60}m)")
+            print(f"  💤 Light sleep:   {session_light} min ({session_light // 60}h {session_light % 60}m)")
+            print(f"  👁️  Awake:         {session_awake} min")
+            print(f"  📦 Records:       {len(session)}")
             print()
 
     def export_to_csv(self, filename=None):
