@@ -75,8 +75,24 @@ async def main():
         print("❌ No CL837 found")
         return
     
-    device = cl837[0]
-    print(f"📱 Found: {device.name}")
+    # Auto-select first device or prompt for multiple
+    if len(cl837) == 1:
+        device = cl837[0]
+        print(f"📱 Found: {device.name}")
+    else:
+        print(f"\nFound {len(cl837)} devices:")
+        for i, d in enumerate(cl837, 1):
+            print(f"{i}. {d.name} - {d.address}")
+        
+        while True:
+            try:
+                choice = int(input("\nSelect device number: "))
+                if 1 <= choice <= len(cl837):
+                    device = cl837[choice - 1]
+                    break
+                print(f"Invalid choice. Enter 1-{len(cl837)}")
+            except ValueError:
+                print("Invalid input. Enter a number.")
     
     async with BleakClient(device) as client:
         print("✅ Connected")
@@ -148,21 +164,14 @@ async def main():
         if 1733000000 < utc < 1735700000:  # ~Dec 2025
             print(f"           Activity: {rec['activity_indices'][:10]}...")
     
-    # Export valid records to CSV
+    # Export ALL records to CSV (raw data)
     print(f"\n{'='*80}")
-    print("EXPORTING VALID RECORDS TO CSV...")
+    print("EXPORTING ALL RAW RECORDS TO CSV...")
     print(f"{'='*80}\n")
     
-    valid_records = []
-    for rec in all_records:
-        utc = rec['utc']
-        count = rec['count']
-        if utc >= MIN_VALID and utc <= current_time and count > 0:
-            valid_records.append(rec)
-    
-    if valid_records:
+    if all_records:
         # Sort by timestamp
-        valid_records.sort(key=lambda x: x['utc'])
+        all_records.sort(key=lambda x: x['utc'])
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"sleep_data_{timestamp}.csv"
@@ -182,7 +191,7 @@ async def main():
             
             writer.writeheader()
             
-            for i, rec in enumerate(valid_records, 1):
+            for i, rec in enumerate(all_records, 1):
                 utc = rec['utc']
                 count = rec['count']
                 activities = rec['activity_indices']
@@ -224,9 +233,15 @@ async def main():
                     'activity_indices': str(activities)
                 })
         
-        print(f"✅ Exported {len(valid_records)} valid records to: {filename}")
+        print(f"💾 Exported {len(all_records)} raw records to: {filename}")
+        
+        # Count valid vs invalid
+        valid_count = sum(1 for r in all_records 
+                        if r['utc'] >= MIN_VALID and r['utc'] <= current_time and r['count'] > 0)
+        invalid_count = len(all_records) - valid_count
+        print(f"   ✅ Valid: {valid_count} | ❌ Invalid: {invalid_count}")
     else:
-        print("❌ No valid records to export")
+        print("❌ No records to export")
 
 if __name__ == "__main__":
     asyncio.run(main())

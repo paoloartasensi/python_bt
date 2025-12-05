@@ -403,9 +403,17 @@ class CL837SleepManager:
             print(f"  📦 Records:       {len(session)}")
             print()
 
-    def export_to_csv(self, filename=None):
-        """Export sleep data to CSV file"""
-        if not self.sleep_data:
+    def export_to_csv(self, filename=None, raw_data=None):
+        """Export sleep data to CSV file
+        
+        Args:
+            filename: Output filename (auto-generated if None)
+            raw_data: If provided, export this data instead of self.sleep_data
+                      Used to save raw data before filtering
+        """
+        data_to_export = raw_data if raw_data is not None else self.sleep_data
+        
+        if not data_to_export:
             print("⚠️  No data to export")
             return False
         
@@ -429,7 +437,7 @@ class CL837SleepManager:
                 
                 writer.writeheader()
                 
-                for i, record in enumerate(self.sleep_data, 1):
+                for i, record in enumerate(data_to_export, 1):
                     writer.writerow({
                         'record_number': i,
                         'utc_timestamp': record['utc'],
@@ -442,7 +450,7 @@ class CL837SleepManager:
                         'activity_indices': str(record['activity_indices'])
                     })
             
-            print(f"📄 Data exported to: {filename}")
+            print(f"💾 Exported {len(data_to_export)} records to: {filename}")
             return True
             
         except Exception as e:
@@ -475,8 +483,12 @@ class CL837SleepManager:
         # Step 5: Download data (unless sync-only mode)
         if not self.sync_only:
             if await self.download_sleep_data():
+                # Save ALL raw data first (before filtering)
+                raw_data = self.sleep_data.copy()
+                self.export_to_csv(raw_data=raw_data)
+                
+                # Then analyze (which filters invalid records)
                 self.analyze_and_display()
-                self.export_to_csv()
         
         # Step 6: Cleanup
         await self.client.stop_notify(self.tx_char)
