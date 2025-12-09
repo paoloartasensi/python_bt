@@ -93,7 +93,7 @@ def load_sleep_data(csv_path: str) -> pd.DataFrame:
         (x - timedelta(hours=18)).date() if x.hour < 18 else x.date()
     )
     
-    # Ricalcola le fasi usando la logica SDK
+    # Recalculate phases using SDK logic
     sdk_phases = []
     for _, row in df.iterrows():
         try:
@@ -112,7 +112,7 @@ def load_sleep_data(csv_path: str) -> pd.DataFrame:
 
 
 def get_night_label(night_date) -> str:
-    """Genera etichetta per la notte (es: 'Night 2→3 Dec')"""
+    """Generate label for the night (e.g., 'Night 2→3 Dec')"""
     next_day = night_date + timedelta(days=1)
     return f"{night_date.strftime('%d')}→{next_day.strftime('%d %b')}"
 
@@ -258,7 +258,7 @@ def plot_sleep_summary_table(df: pd.DataFrame, output_path: str = None):
     """
     Text summary table of all nights
     """
-    # Aggrega per notte
+    # Aggregate by night
     nights_data = []
     
     for night_date in sorted(df['sleep_night'].unique()):
@@ -314,11 +314,11 @@ def plot_sleep_summary_table(df: pd.DataFrame, output_path: str = None):
 
 def plot_sleep_quality_timeline(df: pd.DataFrame, output_path: str = None):
     """
-    Timeline del sonno con qualità (% deep sleep) - usando logica SDK
+    Sleep quality timeline (% deep sleep) - using SDK logic
     """
     fig, ax = plt.subplots(figsize=(14, 5))
     
-    # Usa i dati ricalcolati con logica SDK
+    # Use recalculated data with SDK logic
     df['total_sleep'] = df['deep_sleep_sdk'] + df['light_sleep_sdk']
     df['deep_pct'] = np.where(df['total_sleep'] > 0, 
                                df['deep_sleep_sdk'] / df['total_sleep'] * 100, 0)
@@ -364,11 +364,11 @@ def plot_sleep_quality_timeline(df: pd.DataFrame, output_path: str = None):
 
 def plot_daily_summary(df: pd.DataFrame, output_path: str = None):
     """
-    Sommario per NOTTE di sonno (non per giorno solare)
-    Una notte = sonno tra 18:00 giorno X e 18:00 giorno X+1
-    Usa classificazione fasi SDK (basata su consecutività zeri)
+    Summary per NIGHT of sleep (not per calendar day)
+    A night = sleep between 18:00 day X and 18:00 day X+1
+    Uses SDK phase classification (based on consecutive zeros)
     """
-    # Aggrega per NOTTE usando dati SDK
+    # Aggregate by NIGHT using SDK data
     nightly = df.groupby('sleep_night').agg({
         'deep_sleep_sdk': 'sum',
         'light_sleep_sdk': 'sum',
@@ -384,7 +384,7 @@ def plot_daily_summary(df: pd.DataFrame, output_path: str = None):
     
     fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     
-    # Grafico 1: Durata totale sonno per NOTTE
+    # Chart 1: Total sleep duration per NIGHT
     ax1 = axes[0]
     x_pos = range(len(nightly))
     bars = ax1.bar(x_pos, nightly['total_hours'], color='#5c6bc0', alpha=0.8, edgecolor='black')
@@ -396,13 +396,13 @@ def plot_daily_summary(df: pd.DataFrame, output_path: str = None):
     ax1.grid(axis='y', alpha=0.3)
     ax1.set_ylim(0, max(nightly['total_hours']) + 1)
     
-    # Etichette sui bar
+    # Labels on bars
     for bar, hours in zip(bars, nightly['total_hours']):
         if hours > 0:
             ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
                     f'{hours:.1f}h', ha='center', va='bottom', fontsize=9)
     
-    # Grafico 2: Composizione sonno (stacked) - usando dati SDK
+    # Chart 2: Sleep composition (stacked) - using SDK data
     ax2 = axes[1]
     ax2.bar(x_pos, nightly['deep_sleep_sdk']/60, label='Deep', color='#1a237e', alpha=0.9)
     ax2.bar(x_pos, nightly['light_sleep_sdk']/60, bottom=nightly['deep_sleep_sdk']/60,
@@ -417,7 +417,7 @@ def plot_daily_summary(df: pd.DataFrame, output_path: str = None):
     ax2.legend(loc='upper right')
     ax2.grid(axis='y', alpha=0.3)
     
-    # X labels con notti
+    # X labels with nights
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels(nightly['night_label'], rotation=45, ha='right')
     ax1.set_xticks(x_pos)
@@ -434,7 +434,7 @@ def plot_daily_summary(df: pd.DataFrame, output_path: str = None):
 
 def plot_activity_heatmap(df: pd.DataFrame, output_path: str = None):
     """
-    Heatmap dell'attività durante il sonno (activity_indices)
+    Heatmap of activity during sleep (activity_indices)
     """
     # Parsa gli activity indices
     all_activities = []
@@ -458,7 +458,7 @@ def plot_activity_heatmap(df: pd.DataFrame, output_path: str = None):
     
     fig, ax = plt.subplots(figsize=(14, 4))
     
-    # Crea il grafico ad area
+    # Create area chart
     ax.fill_between(range(len(all_activities)), all_activities, alpha=0.6, color='#7e57c2')
     ax.plot(range(len(all_activities)), all_activities, color='#4527a0', linewidth=0.5)
     
@@ -466,7 +466,7 @@ def plot_activity_heatmap(df: pd.DataFrame, output_path: str = None):
     ax.set_ylabel('Activity Index', fontsize=11)
     ax.set_title('Sleep Activity/Movement Over Time', fontsize=14, fontweight='bold')
     
-    # Evidenzia zone di alta attività
+    # Highlight high activity zones
     threshold = np.mean(all_activities) + np.std(all_activities)
     ax.axhline(y=threshold, color='red', linestyle='--', alpha=0.5, 
                label=f'High activity threshold ({threshold:.1f})')
@@ -485,13 +485,13 @@ def plot_activity_heatmap(df: pd.DataFrame, output_path: str = None):
 
 def plot_sleep_hypnogram(df: pd.DataFrame, night_date: str = None, output_path: str = None):
     """
-    Ipnogramma: grafico classico delle fasi del sonno
+    Hypnogram: classic sleep phase chart
     """
     if night_date:
-        # Filtra per una notte specifica
+        # Filter for a specific night
         df_night = df[df['date'] == pd.to_datetime(night_date).date()]
     else:
-        # Prendi l'ultima notte con dati sufficienti
+        # Take the last night with sufficient data
         dates_with_data = df.groupby('date')['duration_minutes'].sum()
         dates_with_data = dates_with_data[dates_with_data > 60]
         if len(dates_with_data) == 0:
@@ -506,7 +506,7 @@ def plot_sleep_hypnogram(df: pd.DataFrame, night_date: str = None, output_path: 
     
     fig, ax = plt.subplots(figsize=(14, 4))
     
-    # Costruisci ipnogramma
+    # Build hypnogram
     times = []
     stages = []  # 0=Awake, 1=Light, 2=Deep
     
@@ -516,12 +516,12 @@ def plot_sleep_hypnogram(df: pd.DataFrame, night_date: str = None, output_path: 
             start_time = row['datetime_utc']
             interval_min = row['duration_minutes'] / len(activities) if len(activities) > 0 else 5
             
-            # Determina la fase del sonno basandosi sull'attività
+            # Determine sleep phase based on activity
             for i, act in enumerate(activities):
                 t = start_time + timedelta(minutes=i * interval_min)
                 times.append(t)
                 
-                # Euristica: alta attività = awake/light, bassa = deep
+                # Heuristic: high activity = awake/light, low = deep
                 if act > 10:
                     stages.append(0)  # Awake
                 elif act > 3:
@@ -542,7 +542,7 @@ def plot_sleep_hypnogram(df: pd.DataFrame, night_date: str = None, output_path: 
     ax.set_yticks([0, 1, 2])
     ax.set_yticklabels(['Awake', 'Light', 'Deep'])
     ax.set_ylim(-0.5, 2.5)
-    ax.invert_yaxis()  # Deep sleep in basso come negli ipnogrammi standard
+    ax.invert_yaxis()  # Deep sleep at bottom like standard hypnograms
     
     ax.set_xlabel('Time', fontsize=11)
     ax.set_title(f'Sleep Hypnogram - {night_date}', fontsize=14, fontweight='bold')
@@ -560,7 +560,7 @@ def plot_sleep_hypnogram(df: pd.DataFrame, night_date: str = None, output_path: 
     return fig, ax
 
 def main():
-    # Trova il CSV più recente
+    # Find the most recent CSV
     sleep_dir = Path(__file__).parent
     csv_files = list(sleep_dir.glob("sleep_data_*.csv"))
     
@@ -575,16 +575,16 @@ def main():
     print(f"Loaded {len(df)} sleep records")
     print(f"Date range: {df['datetime_utc'].min()} to {df['datetime_utc'].max()}")
     
-    # Mostra tabella riassuntiva
+    # Show summary table
     plot_sleep_summary_table(df)
     
-    # Genera tutti i grafici
+    # Generate all charts
     output_dir = sleep_dir / "plots"
     output_dir.mkdir(exist_ok=True)
     
     print("\n📊 Generating sleep charts...")
     
-    # 1. PRINCIPALE: Grafici a torta per notte
+    # 1. MAIN: Pie charts per night
     plot_night_pies(df, str(output_dir / "night_pies.png"))
     
     # 2. Sommario giornaliero (bar chart)
@@ -593,10 +593,10 @@ def main():
     # 3. Qualità nel tempo
     plot_sleep_quality_timeline(df, str(output_dir / "sleep_quality_timeline.png"))
     
-    # 4. Attività durante il sonno
+    # 4. Activity during sleep
     plot_activity_heatmap(df, str(output_dir / "activity_heatmap.png"))
     
-    # 5. Ipnogramma ultima notte
+    # 5. Hypnogram last night
     plot_sleep_hypnogram(df, output_path=str(output_dir / "hypnogram.png"))
     
     print(f"\n✅ All charts saved to: {output_dir}")
