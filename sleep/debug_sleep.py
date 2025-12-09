@@ -1,6 +1,6 @@
 """
-Debug script - mostra TUTTI i record del sonno, anche quelli con timestamp invalidi
-Ora include anche export CSV dei record validi
+Debug script - shows ALL sleep records, including those with invalid timestamps
+Also includes CSV export of all raw records
 """
 import asyncio
 import time
@@ -130,7 +130,7 @@ async def main():
         await client.stop_notify(tx_char)
     
     print(f"\n{'='*80}")
-    print(f"TUTTI I RECORD RAW: {len(all_records)}")
+    print(f"ALL RAW RECORDS: {len(all_records)}")
     print(f"{'='*80}\n")
     
     current_time = int(time.time())
@@ -143,13 +143,13 @@ async def main():
         
         # Determine validity
         if utc < MIN_VALID:
-            status = "❌ TROPPO VECCHIO"
+            status = "❌ TOO OLD"
         elif utc > current_time:
-            status = "❌ FUTURO"
+            status = "❌ FUTURE"
         elif count == 0:
-            status = "❌ VUOTO"
+            status = "❌ EMPTY"
         else:
-            status = "✅ VALIDO"
+            status = "✅ VALID"
         
         # Try to parse datetime
         try:
