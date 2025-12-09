@@ -174,7 +174,7 @@ async def main():
         all_records.sort(key=lambda x: x['utc'])
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"sleep_data_{timestamp}.csv"
+        filename = f"raw_sleep_data_{timestamp}.csv"
         
         with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=[
