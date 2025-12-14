@@ -10,9 +10,10 @@ import time
 import struct
 import traceback
 import threading
-import winsound
 import math
 import numpy as np
+import os
+import sys
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,6 +24,31 @@ matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from bleak import BleakClient, BleakScanner
+
+
+# =============================================================================
+# CROSS-PLATFORM BEEP
+# =============================================================================
+
+def beep(frequency=1000, duration_ms=100):
+    """Cross-platform beep function
+    
+    Args:
+        frequency: Frequency in Hz (ignored on macOS)
+        duration_ms: Duration in milliseconds (ignored on macOS)
+    """
+    try:
+        if sys.platform == 'darwin':  # macOS
+            # Use afplay with system beep sound
+            os.system('afplay /System/Library/Sounds/Tink.aiff &')
+        elif sys.platform == 'win32':  # Windows
+            import winsound
+            winsound.Beep(frequency, duration_ms)
+        else:  # Linux
+            os.system(f'beep -f {frequency} -l {duration_ms} &')
+    except:
+        # Fallback: print bell character
+        print('\a', end='', flush=True)
 
 
 # =============================================================================
@@ -548,6 +574,12 @@ class CL837VBTMonitor:
         print("VBT MONITOR - Dart Translation")
         print("="*70)
     
+    def on_close(self, event):
+        """Handle window close event"""
+        print("\n🔴 Closing VBT window...")
+        self.monitoring_active = False
+        plt.close('all')
+    
     def _on_rep_captured(self, rep: CapturedRep):
         """Callback when rep is captured"""
         self.rep_velocities.append(rep.velocity)
@@ -555,10 +587,7 @@ class CL837VBTMonitor:
         self.last_velocity = rep.velocity
         
         # Beep on rep detection
-        try:
-            winsound.Beep(1000, 100)  # 1kHz, 100ms
-        except:
-            pass
+        beep(1000, 100)  # 1kHz, 100ms
     
     async def scan_and_connect(self):
         """Scan and connect to CL837"""
@@ -647,6 +676,9 @@ class CL837VBTMonitor:
                                                            gridspec_kw={'height_ratios': [1, 2]})
         self.fig.suptitle("VBT MONITOR - Rep Capture", fontsize=18, fontweight='bold')
         
+        # Register close event handler
+        self.fig.canvas.mpl_connect('close_event', self.on_close)
+        
         # SUBPLOT 1: Bar chart (top)
         self.ax.set_xlabel("Repetition Number", fontsize=14, fontweight='bold')
         self.ax.set_ylabel("Mean Velocity (m/s)", fontsize=14, fontweight='bold')
@@ -706,12 +738,9 @@ class CL837VBTMonitor:
                 # Beep on each countdown number change
                 if countdown_num != self.last_countdown_num:
                     self.last_countdown_num = countdown_num
-                    try:
-                        # Different frequency for each number
-                        freq = 600 + (3 - countdown_num) * 200  # 600, 800, 1000 Hz
-                        winsound.Beep(freq, 150)
-                    except:
-                        pass
+                    # Different frequency for each number
+                    freq = 600 + (3 - countdown_num) * 200  # 600, 800, 1000 Hz
+                    beep(freq, 150)
             else:
                 self.countdown_active = False
                 self.countdown_text.set_alpha(0.0)
@@ -916,10 +945,7 @@ class CL837VBTMonitor:
                             print("🎯 MONITORING ACTIVE - Perform reps!")
                             
                             # Beep to signal ready
-                            try:
-                                winsound.Beep(800, 200)
-                            except:
-                                pass
+                            beep(800, 200)
             else:
                 # Process sample through rep capture service
                 self.rep_service.process_sample(sample)
@@ -941,9 +967,41 @@ class CL837VBTMonitor:
         
         print("✅ Accelerometer stream started")
 
-    async def run(self):
-        """Main run loop"""
-        # Get weight from user
+    async def run_ble(self):
+        """Run BLE connection (to be called in background thread)"""
+        # Connect
+        if not await self.scan_and_connect():
+            return False
+        
+        # Discover services
+        if not await self.discover_services():
+            return False
+        
+        # Start accelerometer
+        await self.start_accelerometer_stream()
+        
+        # Keep connection alive
+        try:
+            while self.monitoring_active:
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            pass
+        
+        # Cleanup
+        print("\n🛑 Stopping BLE...")
+        try:
+            if self.client and self.client.is_connected:
+                await self.client.stop_notify(self.tx_char.uuid)
+                await self.client.disconnect()
+                print("✅ Disconnected")
+        except Exception as e:
+            print(f"⚠️ Cleanup error: {e}")
+        
+        return True
+    
+    def run(self):
+        """Main run loop (macOS compatible - matplotlib in main thread)"""
+        # Get weight from user FIRST (before any threading or matplotlib)
         while True:
             try:
                 weight_str = input("\n🏋️ Enter weight (kg) [default: 20]: ").strip()
@@ -957,22 +1015,22 @@ class CL837VBTMonitor:
         
         print(f"\n→ Weight set to: {self.load_weight_kg:.0f} kg")
         
-        # Connect
-        if not await self.scan_and_connect():
-            return
-        
-        # Discover services
-        if not await self.discover_services():
-            return
-        
-        # Setup plot
+        # Setup plot in main thread BEFORE starting BLE (REQUIRED on macOS)
+        print("\n🎨 Setting up display in main thread...")
         self.setup_plot()
         
-        # Start accelerometer
-        await self.start_accelerometer_stream()
+        # Start BLE in background thread
+        def run_ble_thread():
+            asyncio.run(self.run_ble())
+        
+        ble_thread = threading.Thread(target=run_ble_thread, daemon=True)
+        self.monitoring_active = True
+        
+        print("\n🔵 Starting BLE in background thread...")
+        ble_thread.start()
         
         # Start animation
-        print("\n🎬 Starting real-time display...")
+        print("🎬 Starting real-time display...")
         self.animation_obj = animation.FuncAnimation(
             self.fig, 
             self.update_plot, 
@@ -981,33 +1039,33 @@ class CL837VBTMonitor:
             cache_frame_data=False
         )
         
-        plt.show()
-        
-        # Cleanup
-        print("\n🛑 Stopping...")
+        # Show plot (blocking call in main thread)
         try:
-            if self.client and self.client.is_connected:
-                await self.client.stop_notify(self.tx_char.uuid)
-                await self.client.disconnect()
-                print("✅ Disconnected")
+            plt.show(block=True)
+        except KeyboardInterrupt:
+            print("\n⚠️ Interrupted by user")
         except Exception as e:
-            print(f"⚠️ Cleanup error: {e}")
+            print(f"\n❌ Error: {e}")
+        finally:
+            self.monitoring_active = False
+            print("\n✓ VBT Monitor terminated cleanly")
 
 
 # =============================================================================
 # MAIN
 # =============================================================================
 
-async def main():
+def main():
     """Main entry point"""
     print("\n" + "="*70)
     print("CL837 VBT MONITOR")
     print("Translated from Dart vbt_test")
+    print("macOS Compatible Version")
     print("="*70)
     
     monitor = CL837VBTMonitor()
-    await monitor.run()
+    monitor.run()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
