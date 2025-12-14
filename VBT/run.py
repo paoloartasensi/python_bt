@@ -286,6 +286,12 @@ class CL837UnifiedMonitor:
         self.tx_char = tx_characteristic
         return True
 
+    def on_close(self, event):
+        """Handle window close event"""
+        print("\n🔴 Closing oscilloscope window...")
+        self.monitoring_active = False
+        plt.close('all')
+    
     def setup_oscilloscope(self):
         """Initialize matplotlib oscilloscope"""
         print("Initializing oscilloscope...")
@@ -293,6 +299,9 @@ class CL837UnifiedMonitor:
         # Create figure with subplots - 2x2 grid
         self.fig, self.axes = plt.subplots(2, 2, figsize=(14, 10))
         self.fig.suptitle("CL837 Accelerometer + VBT Monitor - Real Time", fontsize=16, fontweight='bold')
+        
+        # Register close event handler
+        self.fig.canvas.mpl_connect('close_event', self.on_close)
         
         # Configure axes
         ax_mag, ax_vbt, ax_y, ax_stats = self.axes.flatten()
@@ -1224,54 +1233,68 @@ async def async_main(monitor):
         traceback.print_exc()
         return False
 
-def start_plot_thread(monitor):
-    """Start matplotlib in background thread"""
-    def run_plot():
-        monitor.setup_oscilloscope()
-        monitor.animation = animation.FuncAnimation(
-            monitor.fig, monitor.update_plot, interval=50, blit=False, cache_frame_data=False)
-        monitor.plot_ready = True
-        plt.show()  # Blocking call in this thread
+def start_ble_thread(monitor):
+    """Start BLE in background thread"""
+    def run_ble():
+        asyncio.run(async_main(monitor))
     
-    plot_thread = threading.Thread(target=run_plot, daemon=False)
-    plot_thread.start()
-    
-    # Wait for plot to be ready
-    while not monitor.plot_ready:
-        time.sleep(0.1)
-    
-    return plot_thread
+    ble_thread = threading.Thread(target=run_ble, daemon=True)
+    ble_thread.start()
+    return ble_thread
 
 def main():
-    """Main function - runs BLE in main thread, matplotlib in background"""
+    """Main function - runs matplotlib in main thread, BLE in background (macOS compatible)"""
     import warnings
     warnings.filterwarnings("ignore", category=RuntimeWarning)
     
     monitor = CL837UnifiedMonitor()
+    ble_thread = None
     
     try:
-        # Start matplotlib in background thread
-        print("\n🎨 Starting oscilloscope in background...")
-        plot_thread = start_plot_thread(monitor)
+        # Start BLE in background thread
+        print("\n🔵 Starting BLE connection in background thread...")
+        ble_thread = start_ble_thread(monitor)
+        
+        # Wait a moment for BLE to initialize
+        time.sleep(1)
+        
+        # Setup matplotlib in main thread (REQUIRED on macOS)
+        print("\n🎨 Starting oscilloscope in main thread...")
+        monitor.setup_oscilloscope()
+        monitor.animation = animation.FuncAnimation(
+            monitor.fig, monitor.update_plot, interval=50, blit=False, cache_frame_data=False)
+        monitor.plot_ready = True
         print("✓ Oscilloscope window opened")
         
-        # Run BLE in main thread
-        print("\n🔵 Starting BLE connection in main thread...")
-        asyncio.run(async_main(monitor))
+        # Show plot (blocking call in main thread)
+        plt.show(block=True)
         
-        print("\n✓ BLE monitoring completed")
-        print("Waiting for oscilloscope window to close...")
+        print("\n✓ Oscilloscope window closed")
+        print("Stopping BLE monitoring...")
+        monitor.monitoring_active = False
         
-        # Wait for plot thread
-        plot_thread.join()
+        # Give BLE thread time to clean up
+        if ble_thread and ble_thread.is_alive():
+            time.sleep(0.5)
         
     except KeyboardInterrupt:
-        print("\nProgram terminated")
+        print("\n⚠️  Program interrupted by user")
         monitor.monitoring_active = False
-        plt.close('all')
+        try:
+            plt.close('all')
+        except:
+            pass
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        monitor.monitoring_active = False
+        try:
+            plt.close('all')
+        except:
+            pass
     finally:
         # Clean up
         monitor.monitoring_active = False
+        print("\n✓ Program terminated cleanly")
 
 if __name__ == "__main__":
     main()
