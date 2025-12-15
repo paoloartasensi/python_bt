@@ -18,6 +18,7 @@ import asyncio
 import time
 import sys
 import csv
+import re
 from datetime import datetime, timezone
 from bleak import BleakClient, BleakScanner
 
@@ -56,6 +57,35 @@ class CL837SleepManager:
         # Sleep data storage
         self.sleep_data = []
         self.sleep_data_complete = False
+
+    def _device_tag(self):
+        """Return a filename-safe tag like 'CL837-1234567' for the connected device."""
+        if not self.device:
+            return "CL837"
+
+        name = (getattr(self.device, "name", None) or "").strip()
+        address = (getattr(self.device, "address", None) or "").strip()
+
+        model_match = re.search(r"(CL83[17])", name, flags=re.IGNORECASE)
+        model = (model_match.group(1).upper() if model_match else "CL837")
+
+        digits = ""
+        m = re.search(r"CL83[17][^0-9]*([0-9]{4,})", name, flags=re.IGNORECASE)
+        if m:
+            digits = m.group(1)
+        else:
+            m2 = re.search(r"([0-9]{4,})", name)
+            if m2:
+                digits = m2.group(1)
+            else:
+                addr_digits = re.sub(r"\D", "", address)
+                if len(addr_digits) >= 4:
+                    digits = addr_digits
+
+        if digits:
+            digits = digits[-7:]
+            return f"{model}-{digits}"
+        return model
 
     async def scan_and_connect(self):
         """Scan for and connect to CL837 device"""
@@ -419,7 +449,10 @@ class CL837SleepManager:
         
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"sleep_data_{timestamp}.csv"
+            if raw_data is not None:
+                filename = f"raw_sleep_data_{self._device_tag()}_{timestamp}.csv"
+            else:
+                filename = f"sleep_data_{timestamp}.csv"
         
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:

@@ -5,6 +5,7 @@ Also includes CSV export of all raw records
 import asyncio
 import time
 import csv
+import re
 from datetime import datetime, timezone
 from bleak import BleakClient, BleakScanner
 
@@ -14,6 +15,36 @@ CHILEAF_RX_UUID = "aae28f02-71b5-42a1-8c3c-f9cf6ac969d0"
 
 all_records = []
 data_complete = False
+
+
+def device_tag(device):
+    """Build a stable, filename-safe device tag like 'CL837-1234567'."""
+    name = (getattr(device, "name", None) or "").strip()
+    address = (getattr(device, "address", None) or "").strip()
+
+    model_match = re.search(r"(CL83[17])", name, flags=re.IGNORECASE)
+    model = (model_match.group(1).upper() if model_match else "CL837")
+
+    # Prefer digits from advertised name (common format: CL837-1234567)
+    digits = ""
+    m = re.search(r"CL83[17][^0-9]*([0-9]{4,})", name, flags=re.IGNORECASE)
+    if m:
+        digits = m.group(1)
+    else:
+        # Fallback: any digit run in name
+        m2 = re.search(r"([0-9]{4,})", name)
+        if m2:
+            digits = m2.group(1)
+        else:
+            # Last resort: digits from address (may be UUID-like on macOS)
+            addr_digits = re.sub(r"\D", "", address)
+            if len(addr_digits) >= 4:
+                digits = addr_digits
+
+    if digits:
+        digits = digits[-7:]  # keep it short/readable
+        return f"{model}-{digits}"
+    return model
 
 def calculate_checksum(data):
     checksum = sum(data) & 0xFF
@@ -174,7 +205,8 @@ async def main():
         all_records.sort(key=lambda x: x['utc'])
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"raw_sleep_data_{timestamp}.csv"
+        tag = device_tag(device)
+        filename = f"raw_sleep_data_{tag}_{timestamp}.csv"
         
         with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=[
