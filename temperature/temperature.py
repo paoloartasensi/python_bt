@@ -10,6 +10,7 @@ Based on decompiled Chileaf SDK:
 - Android: WearReceivedDataCallback.java (iIntValue == 56)
 """
 import asyncio
+import argparse
 import time
 import struct
 import traceback
@@ -43,6 +44,10 @@ class CL837TemperatureMonitor:
         
         # Latest reading (solo ultimo valore)
         self.latest_temp = None
+        
+        # One-shot mode
+        self.one_shot = False
+        self.data_received = None  # asyncio.Event for one-shot
         
         # Recording
         self.recording = False
@@ -196,6 +201,10 @@ class CL837TemperatureMonitor:
             }
             
             self.readings_count += 1
+            
+            # Signal data received for one-shot mode
+            if self.one_shot and self.data_received:
+                self.data_received.set()
             
             # Record if active
             if self.recording:
@@ -396,6 +405,50 @@ class CL837TemperatureMonitor:
         except Exception as e:
             print(f"Disconnect error: {e}")
 
+    async def run_once(self):
+        """One-shot mode: connect, get ONE reading, disconnect"""
+        self.one_shot = True
+        self.data_received = asyncio.Event()
+        
+        try:
+            # 1. Scan and connect
+            if not await self.scan_and_connect():
+                return None
+            
+            # 2. Discover services
+            if not await self.discover_services():
+                await self.disconnect()
+                return None
+            
+            # 3. Wait for ONE temperature reading (max 20s)
+            print("\nWaiting for temperature data (max 20s)...")
+            try:
+                await asyncio.wait_for(self.data_received.wait(), timeout=20.0)
+            except asyncio.TimeoutError:
+                print("\n✗ Timeout: no temperature data received")
+                await self.disconnect()
+                return None
+            
+            # 4. Print result
+            if self.latest_temp:
+                print("\n" + "=" * 50)
+                print("🌡️  TEMPERATURE READING")
+                print("=" * 50)
+                print(f"   🏠 Environment:  {self.latest_temp['environment']:.1f} °C")
+                print(f"   ✋ Wrist:        {self.latest_temp['wrist']:.1f} °C")
+                print(f"   🩺 Body:         {self.latest_temp['body']:.1f} °C  ({self.interpret_body_temp(self.latest_temp['body'])})")
+                print("=" * 50)
+            
+            # 5. Disconnect immediately
+            await self.disconnect()
+            
+            return self.latest_temp
+            
+        except Exception as e:
+            print(f"\nError: {e}")
+            await self.disconnect()
+            return None
+
     async def run(self):
         """Main execution flow"""
         try:
@@ -445,17 +498,28 @@ class CL837TemperatureMonitor:
 
 async def main():
     """Entry point"""
+    parser = argparse.ArgumentParser(description='CL837 Temperature Monitor')
+    parser.add_argument('--once', action='store_true', 
+                        help='One-shot mode: read once and exit (saves battery)')
+    args = parser.parse_args()
+    
     print("=" * 70)
     print("CL837 Temperature Monitor")
     print("Real-time environment, wrist, and body temperature")
+    if args.once:
+        print("Mode: ONE-SHOT (read once, then disconnect)")
+    else:
+        print("Mode: CONTINUOUS (press Ctrl+C to stop)")
     print("=" * 70)
     
     monitor = CL837TemperatureMonitor()
-    await monitor.run()
     
-    print("\n" + "=" * 70)
-    print("Done!")
-    print("=" * 70)
+    if args.once:
+        await monitor.run_once()
+    else:
+        await monitor.run()
+    
+    print("\nDone!")
 
 
 if __name__ == "__main__":

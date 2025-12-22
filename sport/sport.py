@@ -11,6 +11,7 @@ Based on decompiled Chileaf SDK:
 - Android: WearReceivedDataCallback.java (iIntValue == 21)
 """
 import asyncio
+import argparse
 import time
 import struct
 import traceback
@@ -45,6 +46,10 @@ class CL837SportMonitor:
         
         # Latest reading (solo ultimo valore)
         self.latest_sport = None
+        
+        # One-shot mode
+        self.one_shot = False
+        self.data_received = None  # asyncio.Event for one-shot
         
         # 7-day history
         self.history_7day = []
@@ -212,6 +217,10 @@ class CL837SportMonitor:
                 self.session_start_data = self.latest_sport.copy()
             
             self.readings_count += 1
+            
+            # Signal data received for one-shot mode
+            if self.one_shot and self.data_received:
+                self.data_received.set()
             
             # Record if active
             if self.recording:
@@ -523,6 +532,54 @@ class CL837SportMonitor:
         except Exception as e:
             print(f"Disconnect error: {e}")
 
+    async def run_once(self):
+        """One-shot mode: connect, get ONE reading, disconnect"""
+        self.one_shot = True
+        self.data_received = asyncio.Event()
+        
+        try:
+            # 1. Scan and connect
+            if not await self.scan_and_connect():
+                return None
+            
+            # 2. Discover services
+            if not await self.discover_services():
+                await self.disconnect()
+                return None
+            
+            # 3. Set UTC time
+            if self.rx_char:
+                await self.set_utc_time()
+            
+            # 4. Wait for ONE sport reading (max 30s, data arrives ~15s)
+            print("\nWaiting for sport data (max 30s, arrives ~15s)...")
+            try:
+                await asyncio.wait_for(self.data_received.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                print("\n✗ Timeout: no sport data received")
+                await self.disconnect()
+                return None
+            
+            # 5. Print result
+            if self.latest_sport:
+                print("\n" + "=" * 50)
+                print("🏃 SPORT ACTIVITY READING")
+                print("=" * 50)
+                print(f"   👟 Steps:     {self.latest_sport['steps']:,}")
+                print(f"   📏 Distance:  {self.latest_sport['distance_m']:.0f} m ({self.latest_sport['distance_km']:.2f} km)")
+                print(f"   🔥 Calories:  {self.latest_sport['calories_kcal']:.1f} kcal")
+                print("=" * 50)
+            
+            # 6. Disconnect immediately
+            await self.disconnect()
+            
+            return self.latest_sport
+            
+        except Exception as e:
+            print(f"\nError: {e}")
+            await self.disconnect()
+            return None
+
     async def run(self):
         """Main execution flow"""
         try:
@@ -572,17 +629,28 @@ class CL837SportMonitor:
 
 async def main():
     """Entry point"""
+    parser = argparse.ArgumentParser(description='CL837 Sport Activity Monitor')
+    parser.add_argument('--once', action='store_true', 
+                        help='One-shot mode: read once and exit (saves battery)')
+    args = parser.parse_args()
+    
     print("=" * 70)
     print("CL837 Sport Activity Monitor")
     print("Real-time steps, distance, and calories tracking")
+    if args.once:
+        print("Mode: ONE-SHOT (read once, then disconnect)")
+    else:
+        print("Mode: CONTINUOUS (press Ctrl+C to stop)")
     print("=" * 70)
     
     monitor = CL837SportMonitor()
-    await monitor.run()
     
-    print("\n" + "=" * 70)
-    print("Done!")
-    print("=" * 70)
+    if args.once:
+        await monitor.run_once()
+    else:
+        await monitor.run()
+    
+    print("\nDone!")
 
 
 if __name__ == "__main__":
