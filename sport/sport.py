@@ -16,14 +16,13 @@ import struct
 import traceback
 import csv
 from datetime import datetime, timedelta
-from collections import deque
 from bleak import BleakClient, BleakScanner
 
 
 class CL837SportMonitor:
     """CL837 Sport Activity Monitor - Steps, Distance, Calories"""
     
-    def __init__(self, buffer_size=100):
+    def __init__(self):
         # BLE Connection
         self.client = None
         self.device = None
@@ -44,20 +43,8 @@ class CL837SportMonitor:
         self.tx_char = None
         self.rx_char = None
         
-        # Sport data storage
-        self.buffer_size = buffer_size
-        self.sport_history = deque(maxlen=buffer_size)
-        
-        # Latest readings
-        self.latest_sport = {
-            'steps': None,
-            'distance_cm': None,
-            'distance_m': None,
-            'distance_km': None,
-            'calories_raw': None,
-            'calories_kcal': None,
-            'timestamp': None
-        }
+        # Latest reading (solo ultimo valore)
+        self.latest_sport = None
         
         # 7-day history
         self.history_7day = []
@@ -70,7 +57,7 @@ class CL837SportMonitor:
         # Monitoring control
         self.monitoring = False
         
-        # Statistics
+        # Session tracking
         self.readings_count = 0
         self.session_start = None
         self.session_start_data = None
@@ -224,8 +211,6 @@ class CL837SportMonitor:
                 self.session_start = timestamp
                 self.session_start_data = self.latest_sport.copy()
             
-            # Add to history
-            self.sport_history.append(self.latest_sport.copy())
             self.readings_count += 1
             
             # Record if active
@@ -341,7 +326,7 @@ class CL837SportMonitor:
 
     def get_session_stats(self):
         """Calculate session statistics"""
-        if not self.session_start_data or not self.latest_sport['steps']:
+        if not self.session_start_data or not self.latest_sport or not self.latest_sport['steps']:
             return None
         
         duration = datetime.now() - self.session_start
@@ -384,7 +369,7 @@ class CL837SportMonitor:
         print("=" * 70)
         
         # Current readings
-        if self.latest_sport['timestamp']:
+        if self.latest_sport and self.latest_sport['timestamp']:
             age = (datetime.now() - self.latest_sport['timestamp']).seconds
             freshness = "🟢 Live" if age < 20 else "🟡 Stale" if age < 60 else "🔴 Old"
             
@@ -442,7 +427,7 @@ class CL837SportMonitor:
             print(f"   Total:    {total_steps:>6,} steps, {total_cal:>6.1f} kcal")
             print(f"   Average:  {total_steps//len(self.history_7day):>6,} steps/day")
         
-        print(f"\n📈 Readings: {self.readings_count} | Buffer: {len(self.sport_history)}/{self.buffer_size}")
+        print(f"\n📈 Readings: {self.readings_count}")
         
         print("\n" + "=" * 70)
         print("Commands: [R]ecord  [H]istory 7-day  [S]ave CSV  [C]lear  [Q]uit")
@@ -486,7 +471,7 @@ class CL837SportMonitor:
 
     def clear_session(self):
         """Clear session data"""
-        self.sport_history.clear()
+        self.latest_sport = None
         self.readings_count = 0
         self.session_start = None
         self.session_start_data = None
@@ -592,7 +577,7 @@ async def main():
     print("Real-time steps, distance, and calories tracking")
     print("=" * 70)
     
-    monitor = CL837SportMonitor(buffer_size=200)
+    monitor = CL837SportMonitor()
     await monitor.run()
     
     print("\n" + "=" * 70)

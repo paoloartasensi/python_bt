@@ -15,14 +15,13 @@ import struct
 import traceback
 import csv
 from datetime import datetime
-from collections import deque
 from bleak import BleakClient, BleakScanner
 
 
 class CL837TemperatureMonitor:
     """CL837 Temperature Monitor - Real-time temperature from wearable"""
     
-    def __init__(self, buffer_size=100):
+    def __init__(self):
         # BLE Connection
         self.client = None
         self.device = None
@@ -42,17 +41,8 @@ class CL837TemperatureMonitor:
         self.tx_char = None
         self.rx_char = None
         
-        # Temperature data storage
-        self.buffer_size = buffer_size
-        self.temp_history = deque(maxlen=buffer_size)
-        
-        # Latest readings
-        self.latest_temp = {
-            'environment': None,
-            'wrist': None,
-            'body': None,
-            'timestamp': None
-        }
+        # Latest reading (solo ultimo valore)
+        self.latest_temp = None
         
         # Recording
         self.recording = False
@@ -205,8 +195,6 @@ class CL837TemperatureMonitor:
                 'timestamp': timestamp
             }
             
-            # Add to history
-            self.temp_history.append(self.latest_temp.copy())
             self.readings_count += 1
             
             # Record if active
@@ -266,45 +254,6 @@ class CL837TemperatureMonitor:
             print(f"Set UTC error: {e}")
             return False
 
-    def get_statistics(self):
-        """Calculate statistics from temperature history"""
-        if not self.temp_history:
-            return None
-        
-        import statistics
-        
-        env_values = [t['environment'] for t in self.temp_history if t['environment']]
-        wrist_values = [t['wrist'] for t in self.temp_history if t['wrist']]
-        body_values = [t['body'] for t in self.temp_history if t['body']]
-        
-        stats = {}
-        
-        if env_values:
-            stats['environment'] = {
-                'min': min(env_values),
-                'max': max(env_values),
-                'mean': statistics.mean(env_values),
-                'stdev': statistics.stdev(env_values) if len(env_values) > 1 else 0
-            }
-        
-        if wrist_values:
-            stats['wrist'] = {
-                'min': min(wrist_values),
-                'max': max(wrist_values),
-                'mean': statistics.mean(wrist_values),
-                'stdev': statistics.stdev(wrist_values) if len(wrist_values) > 1 else 0
-            }
-        
-        if body_values:
-            stats['body'] = {
-                'min': min(body_values),
-                'max': max(body_values),
-                'mean': statistics.mean(body_values),
-                'stdev': statistics.stdev(body_values) if len(body_values) > 1 else 0
-            }
-        
-        return stats
-
     def interpret_body_temp(self, temp):
         """Interpret body temperature"""
         if temp is None:
@@ -332,7 +281,7 @@ class CL837TemperatureMonitor:
         print("=" * 70)
         
         # Current readings
-        if self.latest_temp['timestamp']:
+        if self.latest_temp and self.latest_temp['timestamp']:
             age = (datetime.now() - self.latest_temp['timestamp']).seconds
             freshness = "🟢 Live" if age < 20 else "🟡 Stale" if age < 60 else "🔴 Old"
             
@@ -361,30 +310,11 @@ class CL837TemperatureMonitor:
         if self.recording:
             print(f"\n🔴 RECORDING: {len(self.recorded_data)} samples")
         
-        # Statistics
-        stats = self.get_statistics()
-        if stats:
-            print(f"\n📊 STATISTICS ({len(self.temp_history)} readings)")
-            print("-" * 40)
-            
-            if 'environment' in stats:
-                s = stats['environment']
-                print(f"   Environment: {s['mean']:.1f}°C (±{s['stdev']:.1f}) [{s['min']:.1f} - {s['max']:.1f}]")
-            
-            if 'wrist' in stats:
-                s = stats['wrist']
-                print(f"   Wrist:       {s['mean']:.1f}°C (±{s['stdev']:.1f}) [{s['min']:.1f} - {s['max']:.1f}]")
-            
-            if 'body' in stats:
-                s = stats['body']
-                print(f"   Body:        {s['mean']:.1f}°C (±{s['stdev']:.1f}) [{s['min']:.1f} - {s['max']:.1f}]")
-        
         # Info
         print(f"\n📈 Total readings: {self.readings_count}")
-        print(f"   Buffer: {len(self.temp_history)}/{self.buffer_size}")
         
         print("\n" + "=" * 70)
-        print("Commands: [R]ecord start/stop  [S]ave CSV  [C]lear  [Q]uit")
+        print("Commands: [R]ecord start/stop  [S]ave CSV  [Q]uit")
         print("=" * 70)
 
     def start_recording(self):
@@ -424,12 +354,6 @@ class CL837TemperatureMonitor:
             print(f"\n✗ Save error: {e}")
             return None
 
-    def clear_history(self):
-        """Clear temperature history"""
-        self.temp_history.clear()
-        self.readings_count = 0
-        print("\n✓ History cleared")
-
     async def handle_input(self):
         """Handle keyboard input (non-blocking)"""
         import sys
@@ -445,8 +369,6 @@ class CL837TemperatureMonitor:
                         self.start_recording()
                 elif cmd == 's':
                     self.save_to_csv()
-                elif cmd == 'c':
-                    self.clear_history()
                 elif cmd == 'q':
                     self.monitoring = False
 
@@ -528,7 +450,7 @@ async def main():
     print("Real-time environment, wrist, and body temperature")
     print("=" * 70)
     
-    monitor = CL837TemperatureMonitor(buffer_size=200)
+    monitor = CL837TemperatureMonitor()
     await monitor.run()
     
     print("\n" + "=" * 70)
