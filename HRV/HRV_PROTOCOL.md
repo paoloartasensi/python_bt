@@ -15,17 +15,17 @@ Il dispositivo CL837/CL831 fornisce i dati HRV attraverso **due canali distinti*
 
 ### Servizio e Caratteristica
 
-| Campo | Valore |
+|Campo|Valore|
 |-------|--------|
-| Service UUID | `0000180D-0000-1000-8000-00805F9B34FB` (Heart Rate Service) |
-| Characteristic UUID | `00002A37-0000-1000-8000-00805F9B34FB` (Heart Rate Measurement) |
-| Tipo | NOTIFY |
+|Service UUID|`0000180D-0000-1000-8000-00805F9B34FB` (Heart Rate Service)|
+|Characteristic UUID|`00002A37-0000-1000-8000-00805F9B34FB` (Heart Rate Measurement)|
+|Tipo|NOTIFY|
 
 ### Formato del Pacchetto
 
 La caratteristica `2A37` segue lo standard Bluetooth SIG:
 
-```
+```text
 Byte 0: Flags
   - Bit 0: HR format (0 = uint8, 1 = uint16)
   - Bit 1-2: Sensor contact status
@@ -85,17 +85,17 @@ def parse_hr_measurement(data):
 
 ### Servizio e Caratteristica
 
-| Campo | Valore |
+|Campo|Valore|
 |-------|--------|
-| Service UUID | `AAE28F00-71B5-42A1-8C3C-F9CF6AC969D0` |
-| TX Characteristic | `AAE28F01-71B5-42A1-8C3C-F9CF6AC969D0` (NOTIFY) |
-| RX Characteristic | `AAE28F02-71B5-42A1-8C3C-F9CF6AC969D0` (WRITE) |
+|Service UUID|`AAE28F00-71B5-42A1-8C3C-F9CF6AC969D0`|
+|TX Characteristic|`AAE28F01-71B5-42A1-8C3C-F9CF6AC969D0` (NOTIFY)|
+|RX Characteristic|`AAE28F02-71B5-42A1-8C3C-F9CF6AC969D0` (WRITE)|
 
 ### Comando Health Data (0x02)
 
 Il device invia automaticamente dati salute (incluso HRV) tramite notifiche con comando `0x02`:
 
-```
+```text
 [FF] [len] [02] [vo2max] [breath_rate] [emotion] [stress] [stamina] [TP(4)] [LF(4)] [HF(4)] [checksum]
 
 Offset  Bytes  Campo           Tipo        Descrizione
@@ -115,12 +115,12 @@ Offset  Bytes  Campo           Tipo        Descrizione
 
 ### Metriche HRV
 
-| Metrica | Range Freq. | Significato |
+|Metrica|Range Freq.|Significato|
 |---------|-------------|-------------|
-| **TP** (Total Power) | 0-0.4 Hz | Variabilità totale |
-| **LF** (Low Frequency) | 0.04-0.15 Hz | Attività simpatica e parasimpatica |
-| **HF** (High Frequency) | 0.15-0.4 Hz | Attività parasimpatica (vagale) |
-| **LF/HF Ratio** | - | Bilancio simpatico/parasimpatico |
+| **TP** (Total Power) |0-0.4 Hz|Variabilità totale|
+| **LF** (Low Frequency) |0.04-0.15 Hz|Attività simpatica e parasimpatica|
+| **HF** (High Frequency) |0.15-0.4 Hz|Attività parasimpatica (vagale)|
+| **LF/HF Ratio** |-|Bilancio simpatico/parasimpatico|
 
 ---
 
@@ -226,27 +226,27 @@ def calculate_frequency_domain_hrv(rr_intervals, fs=4.0):
 
 ### RMSSD
 
-| Valore (ms) | Interpretazione |
+|Valore (ms)|Interpretazione|
 |-------------|-----------------|
-| < 20 | Basso - possibile stress/affaticamento |
-| 20-50 | Normale |
-| > 50 | Alto - buon recupero |
+|< 20|Basso - possibile stress/affaticamento|
+|20-50|Normale|
+|> 50|Alto - buon recupero|
 
 ### SDNN
 
-| Valore (ms) | Interpretazione |
+|Valore (ms)|Interpretazione|
 |-------------|-----------------|
-| < 50 | Basso |
-| 50-100 | Normale |
-| > 100 | Alto |
+|< 50|Basso|
+|50-100|Normale|
+|> 100|Alto|
 
 ### LF/HF Ratio
 
-| Valore | Interpretazione |
+|Valore|Interpretazione|
 |--------|-----------------|
-| < 1 | Dominanza parasimpatica (rilassamento) |
-| 1-2 | Bilanciato |
-| > 2 | Dominanza simpatica (stress/attivazione) |
+|< 1|Dominanza parasimpatica (rilassamento)|
+|1-2|Bilanciato|
+|> 2|Dominanza simpatica (stress/attivazione)|
 
 ---
 

@@ -16,11 +16,11 @@ La temperatura viene ottenuta tramite il **protocollo Chileaf proprietario** (co
 
 ### Servizio e Caratteristica
 
-| Campo | Valore |
+|Campo|Valore|
 |-------|--------|
-| Service UUID | `AAE28F00-71B5-42A1-8C3C-F9CF6AC969D0` |
-| TX Characteristic | `AAE28F01-71B5-42A1-8C3C-F9CF6AC969D0` (NOTIFY) |
-| RX Characteristic | `AAE28F02-71B5-42A1-8C3C-F9CF6AC969D0` (WRITE) |
+|Service UUID|`AAE28F00-71B5-42A1-8C3C-F9CF6AC969D0`|
+|TX Characteristic|`AAE28F01-71B5-42A1-8C3C-F9CF6AC969D0` (NOTIFY)|
+|RX Characteristic|`AAE28F02-71B5-42A1-8C3C-F9CF6AC969D0` (WRITE)|
 
 ---
 
@@ -30,7 +30,7 @@ La temperatura viene ottenuta tramite il **protocollo Chileaf proprietario** (co
 
 Il device invia automaticamente dati temperatura tramite notifiche con comando `0x38`:
 
-```
+```text
 [FF] [len] [38] [env_h] [env_l] [wrist_h] [wrist_l] [body_h] [body_l] [checksum]
 
 Offset  Bytes  Campo              Tipo       Descrizione
@@ -131,11 +131,11 @@ public interface TemperatureCallback {
 
 ## Tipi di Temperatura
 
-| Tipo | Descrizione | Range Tipico |
+|Tipo|Descrizione|Range Tipico|
 |------|-------------|--------------|
-| **Environment** | Temperatura dell'aria circostante | 15-35 °C |
-| **Wrist** | Temperatura cutanea del polso | 28-35 °C |
-| **Body** | Temperatura corporea stimata | 35-38 °C |
+| **Environment** |Temperatura dell'aria circostante|15-35 °C|
+| **Wrist** |Temperatura cutanea del polso|28-35 °C|
+| **Body** |Temperatura corporea stimata|35-38 °C|
 
 ### Nota sulla Body Temperature
 

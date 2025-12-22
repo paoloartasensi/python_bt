@@ -14,11 +14,11 @@ Il dispositivo CL837/CL831 fornisce dati di attività sportiva in tempo reale e 
 
 ### Servizio e Caratteristica
 
-| Campo | Valore |
+|Campo|Valore|
 |-------|--------|
-| Service UUID | `AAE28F00-71B5-42A1-8C3C-F9CF6AC969D0` |
-| TX Characteristic | `AAE28F01-71B5-42A1-8C3C-F9CF6AC969D0` (NOTIFY) |
-| RX Characteristic | `AAE28F02-71B5-42A1-8C3C-F9CF6AC969D0` (WRITE) |
+|Service UUID|`AAE28F00-71B5-42A1-8C3C-F9CF6AC969D0`|
+|TX Characteristic|`AAE28F01-71B5-42A1-8C3C-F9CF6AC969D0` (NOTIFY)|
+|RX Characteristic|`AAE28F02-71B5-42A1-8C3C-F9CF6AC969D0` (WRITE)|
 
 ---
 
@@ -28,7 +28,7 @@ Il device invia automaticamente notifiche periodiche (~ogni 15 secondi) con i da
 
 ### Formato Notifica
 
-```
+```text
 [FF] [len] [15] [step_h] [step_m] [step_l] [dist_h] [dist_m] [dist_l] [cal_h] [cal_m] [cal_l] [checksum]
 
 Offset  Bytes  Campo       Tipo        Descrizione
@@ -90,13 +90,13 @@ Richiesta dello storico attività degli ultimi 7 giorni.
 
 ### Request
 
-```
+```text
 [FF] [04] [16] [checksum]
 ```
 
 ### Response
 
-```
+```text
 [FF] [len] [16] [data...] [checksum]
 
 Per ogni giorno (10 bytes):
@@ -209,7 +209,7 @@ Le calorie sono **calcolate dal device** usando:
 
 Il device usa tipicamente una formula simile a:
 
-```
+```text
 Calorie = Passi × (Peso × Fattore_Passo)
 ```
 
@@ -249,11 +249,11 @@ async def set_user_info(client, rx_char, age, sex, weight_kg, height_cm):
 
 ### Unità di Misura
 
-| Campo | Unità Raw | Conversione |
+|Campo|Unità Raw|Conversione|
 |-------|-----------|-------------|
-| Steps | count | diretto |
-| Distance | cm | ÷100 per metri |
-| Calories | 0.1 kcal | ÷10 per kcal |
+|Steps|count|diretto|
+|Distance|cm|÷100 per metri|
+|Calories|0.1 kcal|÷10 per kcal|
 
 ### Reset Giornaliero
 

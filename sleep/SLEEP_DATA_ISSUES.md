@@ -13,11 +13,13 @@ This document outlines the concerns and issues discovered while working with sle
 **Problem:** The device returns timestamp `0x48000000` (April 12, 2008) for uninitialized or empty sleep records.
 
 **Impact:**
+
 - Data appears to be from 2008 when the device was manufactured in 2020+
 - All records show identical timestamps regardless of actual sleep time
 - Impossible to correlate sleep data with real dates
 
 **Example:**
+
 ```csv
 record_number,utc_timestamp,datetime_utc,duration_minutes
 1,1207959552,2008-04-12 00:19:12,0
@@ -28,16 +30,19 @@ record_number,utc_timestamp,datetime_utc,duration_minutes
 ### 2. UTC Clock Synchronization Not Persistent
 
 **Problem:** The device does not retain UTC time after:
+
 - Battery fully depletes
 - Device reset
 - Extended periods without app connection
 
 **Observed Behavior:**
+
 - Fresh/reset devices return year 2008 timestamps
 - Manual UTC sync via `CMD_SET_UTC (0x08)` is required
 - Sync must be repeated if device loses power
 
 **Workaround:**
+
 ```bash
 python sleep.py --sync-only
 ```
@@ -153,9 +158,9 @@ def is_valid_sleep_record(record):
 
 ## 📅 Document History
 
-| Date | Notes |
+|Date|Notes|
 |------|-------|
-| 2025-12-05 | Initial documentation after discovering timestamp issues |
+|2025-12-05|Initial documentation after discovering timestamp issues|
 
 ---
 
