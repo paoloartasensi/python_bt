@@ -1,0 +1,33 @@
+======================================================================
+CL837 DEVICE DIAGNOSTICS REPORT
+======================================================================
+Device: CL837-0758807
+Address: 9E8F9722-C402-E84C-D200-9EDE85BC94FB
+Test Date: 2025-12-23 07:49:00
+======================================================================
+
+SUPPORTED FEATURES (10):
+  • Standard HR Service (6 records/responses)
+  • Sleep History (10 records/responses)
+  • Sport 7-Day History (1 records/responses)
+  • HR Record List (1 records/responses)
+  • RR Record List (1 records/responses)
+  • 3D History (7 records/responses)
+  • Step Record List (2 records/responses)
+  • Interval Steps (1 records/responses)
+  • Single Tap Records (10 records/responses)
+  • User Info (13 records/responses)
+
+ACCEPTED BUT NO DATA (0):
+
+NOT WORKING/TIMEOUT (0):
+
+RECOMMENDED SCRIPTS:
+  ✓ python 3d_history.py
+  ✓ python hr_history.py
+  ✓ python realtime_monitor.py
+  ✓ python rr_history.py
+  ✓ python sleep.py
+  ✓ python sport_history.py
+  ✓ python steps_history.py
+  ✓ python user_info.py

@@ -345,8 +345,8 @@ class SleepAnalyzer:
             return
         
         # Header tabella
-        print(f"\n{'Notte':<12} {'Letto':<8} {'Dormito':<8} {'Deep':<8} "
-              f"{'Light':<8} {'Awake':<8} {'Eff%':<6} {'Deep%':<6}")
+        print(f"\n{'Notte':<12} {'Letto':<12} {'Dormito':<12} {'Deep':<12} "
+              f"{'Light':<12} {'Awake':<10} {'Eff%':<6} {'Deep%':<6}")
         print("-" * 80)
         
         total_deep = 0
@@ -356,16 +356,22 @@ class SleepAnalyzer:
         
         for session in self.night_sessions:
             label = session.get_night_label()
-            bed_time = f"{session.time_in_bed:.0f}m"
-            sleep_time = f"{session.total_min}m"
-            deep = f"{session.deep_min}m"
-            light = f"{session.light_min}m"
-            awake = f"{session.awake_min}m"
+            bed_h = session.time_in_bed / 60
+            sleep_h = session.total_min / 60
+            deep_h = session.deep_min / 60
+            light_h = session.light_min / 60
+            awake_h = session.awake_min / 60
+            
+            bed_time = f"{session.time_in_bed:.0f}m ({bed_h:.1f}h)"
+            sleep_time = f"{session.total_min:.0f}m ({sleep_h:.1f}h)"
+            deep = f"{session.deep_min:.0f}m ({deep_h:.1f}h)"
+            light = f"{session.light_min:.0f}m ({light_h:.1f}h)"
+            awake = f"{session.awake_min:.0f}m ({awake_h:.1f}h)"
             eff = f"{session.efficiency:.0f}%"
             deep_pct = f"{session.deep_percentage:.0f}%"
             
-            print(f"{label:<12} {bed_time:<8} {sleep_time:<8} {deep:<8} "
-                  f"{light:<8} {awake:<8} {eff:<6} {deep_pct:<6}")
+            print(f"{label:<12} {bed_time:<12} {sleep_time:<12} {deep:<12} "
+                  f"{light:<12} {awake:<10} {eff:<6} {deep_pct:<6}")
             
             total_deep += session.deep_min
             total_light += session.light_min

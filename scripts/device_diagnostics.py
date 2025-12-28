@@ -36,6 +36,7 @@ class CL837Diagnostics:
             'Sport 7-Day History': {'cmd': 0x16, 'params': [0x00], 'timeout': 10},
             'HR Record List': {'cmd': 0x21, 'params': [0x00], 'timeout': 10},
             'RR Record List': {'cmd': 0x24, 'params': [], 'timeout': 10},
+            '3D History': {'cmd': 0x77, 'params': [0x00], 'timeout': 10},
             'Step Record List': {'cmd': 0x90, 'params': [], 'timeout': 10},
             'Interval Steps': {'cmd': 0x40, 'params': [0x00], 'timeout': 10},
             'Single Tap Records': {'cmd': 0x42, 'params': [0x00], 'timeout': 10},
@@ -412,6 +413,8 @@ class CL837Diagnostics:
             'Interval Steps': 'steps_history.py',
             'Step Record List': 'steps_history.py',
             'HR Record List': 'hr_history.py',
+            'RR Record List': 'rr_history.py',
+            '3D History': '3d_history.py',
             'Standard HR Service': 'realtime_monitor.py',
             'User Info': 'user_info.py'
         }
